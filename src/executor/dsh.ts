@@ -278,7 +278,10 @@ export class DshExecutor implements Executor {
       const subprocess = this.host.context.subprocess
       const signal = this.host.lifetime
       await verifyDirectory(directory, subprocess, signal)
-      if (prepared) return
+      if (prepared) {
+        if (identity !== await this.workspaceIdentity(directory)) throw new Error('The workspace was replaced during verification')
+        return
+      }
       const git = await lstat(join(directory, '.git')).then(() => true, (error: NodeJS.ErrnoException) => {
         if (error.code === 'ENOENT') return false
         throw error
@@ -286,7 +289,7 @@ export class DshExecutor implements Executor {
       const baseline = git
         ? (await runAsWorker(subprocess, ['git', 'rev-parse', '--verify', 'HEAD'], directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))).trim()
         : 'directory'
-      if (git && !/^[a-f0-9]{40,64}$/.test(baseline)) throw new Error('The workspace does not have a verifiable Git HEAD')
+      if (git && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baseline)) throw new Error('The workspace does not have a verifiable Git HEAD')
       if (identity !== await this.workspaceIdentity(directory)) throw new Error('The workspace was replaced during verification')
       this.host.lifetime.throwIfAborted()
       this.host.store.set(record, { directory, identity, baseline })

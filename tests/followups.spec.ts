@@ -301,3 +301,20 @@ it('tells a worker it may hand back a message beyond its ticket or for another o
   expect((h.tools.get(sessionId)!.get('orchestrator_trigger_handback') as unknown as { description: string }).description)
     .toContain('beyond this ticket or for another one')
 })
+
+it('removes a subscription created solely by an attachment that the worker rejects', async () => {
+  h = await startRuntime()
+  const { ticket, sessionId } = await h.acceptedTicket(feishu('1', '@bot First task'))
+  const mistake = feishu('24', '@bot A different task')
+  h.runtime.receive(mistake)
+  await h.runtime.idle()
+  await h.route({ kind: 'attach', ticket_id: ticket.id, trigger_id: mistake.id })
+  const key = `feishu:${CHAT}:om_24`
+  expect(h.runtime.store.threads.get(key)?.subscriptions).toEqual([ticket.id])
+  await h.runTool(sessionId, 'orchestrator_trigger_handback', { trigger_id: mistake.id, reason: 'Different deliverable' })
+  expect(h.runtime.store.threads.get(key)?.subscriptions).toEqual([])
+  expect(h.runtime.store.threads.get(`feishu:${CHAT}:om_1`)?.subscriptions).toEqual([ticket.id])
+  const later = feishu('25', '@bot Continue other work', { root_id: 'om_24' })
+  h.runtime.receive(later)
+  expect(h.runtime.store.triggers.disposition(later.id)?.fanout).toEqual([])
+})

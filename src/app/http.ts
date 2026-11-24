@@ -1,9 +1,11 @@
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { z } from 'zod'
 import { THREAD_FILTERS, TICKET_FILTERS, type Api, type ApiResponse, type RouteParams } from './api.ts'
+import { LocalSubmissionConflict, LocalSubmissionSchema, type LocalSubmission, type submitLocal } from './local-intake.ts'
 import { sourceSkills } from './context.ts'
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
 import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, builtInParts, defaultPrompts, savePrompts, type Prompts }
@@ -52,13 +54,14 @@ export interface HttpHost {
   ticketEnvironment(ticket: Ticket): Variable[]
   checkSetup(): void
   requestPass(): void
+  submitLocal(submission: LocalSubmission): ReturnType<typeof submitLocal>
   models(): Promise<ModelCatalog>
 }
 /**
  * Represents a client-facing 400 or 404 error raised during management route parsing or lookup.
  * Route handlers throw it when request bodies are malformed or target records are missing, and registerHttp serializes its status and message in the HTTP response.
  */
-class RouteError extends Error { constructor(readonly status: 400 | 404, message: string) { super(message) } }
+class RouteError extends Error { constructor(readonly status: 400 | 404 | 503, message: string) { super(message) } }
 async function readBody(req: IncomingMessage, maxBytes = 128 * 1024): Promise<unknown> {
   let size = 0; const chunks: Buffer[] = []
   for await (const chunk of req) {
@@ -77,6 +80,11 @@ export function sameOrigin(req: Pick<IncomingMessage, 'headers'>, port: number):
   if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return false
   return req.headers['x-orchestrator-request'] === '1' && (req.headers.origin === undefined || req.headers.origin === `http://${host}`)
 }
+/** The server stores only the operator token hash. The token itself stays with the operator. */
+function authorized(header: string | undefined, hash: string | undefined): boolean {
+  const token = /^Bearer ([A-Za-z0-9_-]{32,128})$/.exec(header ?? '')?.[1]
+  return !!token && !!hash && /^[a-f0-9]{64}$/.test(hash) && timingSafeEqual(createHash('sha256').update(token).digest(), Buffer.from(hash, 'hex'))
+}
 /** Maps errors to HTTP status codes and structured payloads that the panel localizes in the interface language. */
 function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof z.ZodError) {
@@ -86,7 +94,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
-  if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof LocalSubmissionConflict) return [409, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
@@ -154,6 +162,12 @@ function routes(runtime: HttpHost): Routes {
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
     'GET state': () => stateView(runtime),
+    'POST local/submit': async ({ body }) => {
+      if (!runtime.configured()) throw new RouteError(503, 'Superagent is waiting for setup')
+      const receipt = runtime.submitLocal(LocalSubmissionSchema.parse(await body(512 * 1024)))
+      runtime.requestPass()
+      return receipt
+    },
     'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
     'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
@@ -237,6 +251,9 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
       // The port is known once the server listens, which precedes every request it serves.
       const port = ctx.webServer.port
       if (port === undefined || !sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+      if (req.method !== 'GET' && !authorized(req.headers.authorization, runtime.machine?.operatorTokenHash)) {
+        json(res, 401, { error: 'An operator bearer token is required for management changes' }); return
+      }
       try {
         await runtime.ready
         const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))

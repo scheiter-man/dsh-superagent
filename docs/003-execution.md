@@ -24,9 +24,9 @@ An `idle` Ticket has finished its turn without an outstanding question. A Trigge
 
 Each Ticket gets an Executor Session named `worker-<ticket id>` and a directory named after the Ticket's short name. Directories are created under the configured execution root, which defaults to `<stateDir>/work`.
 
-Executor Sessions run commands without approval as the operator's OS user. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
+Executor Sessions use DSH `workspace-write` permissions by default. The operator can explicitly select `danger-full-access` in Execution settings. Prepare commands are trusted operator automation and run before a worker Session starts. Their `dsh-superagent-worker` preset contains the tools needed for work and moves foreground shell commands to background jobs after 5 seconds. This lets a worker receive new messages at the next step instead of waiting for a long command to finish.
 
-The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
+The main Session uses `dsh-superagent-router` and exposes Superagent routing and query tools only. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
 DeepSeek Harness refuses every step of an archived Session. If someone archives the main Session in the Web UI, the next candidate, relay or notice for it creates a new main Session, records its id, and tells it which Session it replaced; this also happens at startup. The archived Session is left as it is, and unarchiving it does not bring it back as the main Session. An archived Executor Session is not replaced: its Ticket stays where it is until someone unarchives it.
 
@@ -50,9 +50,9 @@ Worker subagents, including nested ones, use DeepSeek Harness's `standard` prese
 
 ### Preparing a Ticket directory
 
-Before the first Assignment, if the Ticket directory does not exist, the prepare command runs once with `sh` in the execution root. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.
+Before the first Assignment, the prepare command runs with `sh` in the execution root. The host records the verified directory identity and its initial Git HEAD (when present) in SQLite. It has ten minutes to finish. Without a prepare command, the worker starts in an empty directory.
 
-A failed command fails the Ticket and records its output. A retry or a person's message on one of the Ticket's Threads tries preparation again. A typical command uses `git worktree` to create a checkout. A pull request belongs to the Ticket when its branch's last path segment matches the Ticket's short name.
+A failed command fails the Ticket and records its output. Move aside any unverified residue before retrying. A verified workspace keeps its preparation record after restart, even with uncommitted changes or later commits. A missing or replaced directory blocks reuse. Previously started Tickets from an older bundle can adopt the existing directory once after verification. Keep the state database outside all worker write roots and platform temporary directories when processing real workloads. Full-access workers share the operator's OS rights and can alter that database. Use only the restricted mode and a confining DSH backend for isolated workloads.
 
 ### Concurrency
 

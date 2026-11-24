@@ -2,6 +2,16 @@
 
 Instructions for an agent that sets up dsh-superagent with its operator. If you are a person, ask your coding agent to read this file and follow it.
 
+## Choose a deployment
+
+1. **Local only.** Leave the GitHub repository and CLI empty. Generate an operator token, install the bundle in a dedicated DSH `0.2.2-rc.5` Web profile, and use the Local Source CLI to submit a ticket. A configured DSH model is needed for Workers to run. An idle server and queued local tickets require no GitHub login.
+2. **Single-operator GitHub repository.** Configure `owner/repository` and the path to an authenticated `gh` executable. Setup checks its identity and repository push access. This grants the Worker the rights of the account behind that executable. Use a restricted account if that scope is wider than the intended workload. GitHub notifications from the same account do not serve as a self-assignment channel. Use the Local Source to start tasks yourself.
+3. **Shared repository.** Configure a separate GitHub user and CLI profile as described by the team setup below. Give that identity access only to the repository it watches. Configure the Source allowlist and the repository's own branch protection.
+
+Run `scripts/dsh-superagent init-token --output <private-file>` in an operator terminal, and put the printed SHA-256 value in the plugin's `operatorTokenHash` setting. The token itself stays outside the DSH profile, state directory and workspaces. When the panel requests authorization, provide the token. The operator chooses `workspace-write` (default) or explicitly accepts `danger-full-access` in **Settings → Execution**. Read the [deployment guide](docs/006-deployment.md) for workspaces, local submission, and backup.
+
+## Guided shared-repository setup
+
 ## How to run the setup
 
 The setup follows [docs/000-philosophy.md](docs/000-philosophy.md): it takes as little of the operator's attention as possible.

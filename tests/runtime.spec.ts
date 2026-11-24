@@ -12,7 +12,7 @@ import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
 import { masterPrompt } from '../src/app/context.ts'
-import { reference, testMachine } from './fixtures/deployment.ts'
+import { reference, testAuthorization, testMachine, testOperatorHash } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { TextCache } from '../src/app/cache.ts'
@@ -49,9 +49,11 @@ let guards: Map<string, Guard>
 let restricts: Map<string, unknown[]>
 type HttpHandler = (req: unknown, res: unknown) => Promise<void>
 let http: HttpHandler
-async function api(method: string, path: string): Promise<{ status: number; body: unknown }> {
+async function api(method: string, path: string, body?: unknown, authorization = testAuthorization): Promise<{ status: number; body: unknown }> {
   let status = 0, text = ''
-  const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' } }
+  const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
+  const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization },
+    async *[Symbol.asyncIterator]() { yield* chunks } }
   await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
   return { status, body: JSON.parse(text) }
 }
@@ -107,7 +109,7 @@ async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}):
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store, accounts); store.close()
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
-  runtime = new Runtime(ctx, testMachine({ stateDir: directory, ...machine }), restarts)
+  runtime = new Runtime(ctx, testMachine({ stateDir: directory, operatorTokenHash: testOperatorHash, ...machine }), restarts)
   return runtime
 }
 let deliveries: ReturnType<typeof vi.fn<(request: { sessionId: string; mode: 'queue' | 'steer'; id: string; text: string }) => void>>
@@ -206,7 +208,7 @@ beforeEach(async () => {
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   for (const cli of [AGENT(), OTHER(), BOT()]) writeFileSync(cli, '#!/bin/sh\n', { mode: 0o755 })
   const store = new Store(join(directory, 'orchestrator.sqlite')); seed(store); store.close()
-  runtime = new Runtime(ctx, testMachine({ stateDir: directory }), restarts)
+  runtime = new Runtime(ctx, testMachine({ stateDir: directory, operatorTokenHash: testOperatorHash }), restarts)
   await runtime.ready
   // Source kinds are normally registered by plugins that are not loaded in unit tests.
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
@@ -1129,8 +1131,34 @@ it('refuses to start in a non-empty directory left by failed preparation', async
   expect(runtime.store.get(KV.executor.prepared(ticket.id))).toBeUndefined()
 })
 
+it('authenticates local intake, isolates same-Desk threads, and keeps idempotency after restart', async () => {
+  const first = { request_id: 'request-first', desk: 'review', title: 'Review first', workspace_name: 'review-first', text: 'First request' }
+  const accounts = { github: { repository: '', cli: '' }, feishu: null }
+  const local = await restart({}, accounts)
+  await local.ready
+  const submit = (body: typeof first, authorization?: string) => api('POST', 'local/submit', body, authorization)
+  expect(local.configured()).toBe(true)
+  expect(local.deployment.github).toBeUndefined()
+  expect(await submit(first, '')).toMatchObject({ status: 401 })
+  const reply = await submit(first)
+  expect(reply).toMatchObject({ status: 200, body: { duplicate: false, desk: 'review' } })
+  const { ticket_id, trigger_id } = reply.body as { ticket_id: string; trigger_id: string }
+  expect(await submit({ ...first, text: 'Changed' })).toMatchObject({ status: 409 })
+  const other = await submit({ ...first, request_id: 'request-second', text: 'Second request' })
+  const otherId = (other.body as { ticket_id: string }).ticket_id
+  expect(otherId).not.toBe(ticket_id)
+  expect(local.store.threads.get(`local:${trigger_id}`)?.subscriptions).toEqual([ticket_id])
+  await local.idle()
+  await runTool(`worker-${ticket_id}`, 'orchestrator_report', { state: 'ready', summary: 'Local delivery' })
+  expect(local.store.tickets.get(ticket_id)?.ended?.outcome).toBe('completed')
+  await (await restart({}, accounts)).ready
+  expect(await submit(first)).toMatchObject({ status: 200, body: { ticket_id, duplicate: true } })
+  expect(runtime.store.tickets.list().map(ticket => ticket.id).sort()).toEqual([ticket_id, otherId].sort())
+  expect((await api('GET', `tickets/${ticket_id}`)).body).toMatchObject({ desk: 'review' })
+})
+
 it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, and the Feishu part has nothing to sync', async () => {
-  const next = await restart({}, { feishu: null })
+  const next = await restart({ operatorTokenHash: undefined } as Partial<Machine>, { feishu: null })
   await next.ready
   expect(next.health).not.toHaveProperty('feishu')
   expect(next.health).not.toHaveProperty('sync:feishu')
@@ -1321,7 +1349,7 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
   const request = async (method: string, path: string, body?: unknown) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
-    const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization: testAuthorization }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
@@ -1403,7 +1431,7 @@ it('applies a changed prompt size limit to the next save and request without a r
   const put = async (config: unknown) => {
     let status = 0, text = ''
     const chunks = [Buffer.from(JSON.stringify({ config, baseRevision: next.prompts.current().revision }))]
-    const req = { method: 'PUT', url: '/orchestrator/api/prompts', headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1' }, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method: 'PUT', url: '/orchestrator/api/prompts', headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization: testAuthorization }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }

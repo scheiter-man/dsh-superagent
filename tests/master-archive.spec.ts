@@ -42,3 +42,18 @@ it('replaces an archived main Session once for deliveries that arrive together, 
   expect(h.controller.create.mock.calls.length - created).toBe(1)
   expect(h.runtime.masterId).not.toBe(previous)
 })
+
+it('does not replay a relay already delivered to a router that was subsequently archived', async () => {
+  h = await startRuntime()
+  const previous = h.runtime.masterId
+  const message = JSON.stringify({ kind: 'example', value: 'once' })
+  h.runtime.sessions.relay('example', message)
+  await h.runtime.idle()
+  h.archive(previous)
+  h.runtime.sessions.relay('example', message)
+  await h.runtime.idle()
+  const current = h.runtime.masterId
+  expect(current).not.toBe(previous)
+  expect(h.relays(previous)).toContainEqual({ kind: 'example', value: 'once' })
+  expect(h.relays(current)).not.toContainEqual({ kind: 'example', value: 'once' })
+})

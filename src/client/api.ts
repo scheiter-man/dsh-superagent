@@ -29,12 +29,23 @@ export interface ApiMessages {
 }
 const isUserError = (code: unknown): code is UserErrorCode => typeof code === 'string' && Object.hasOwn(USER_ERRORS, code)
 
+/** Kept in the open panel's memory only. A page reload clears authorization. */
+let operatorToken: string | undefined
+
 /** Calls one management endpoint; the `x-orchestrator-request` header marks the request as originating from this page. */
 async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown): Promise<T> {
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: { 'x-orchestrator-request': '1', ...json.headers } })
+    const send = (token?: string) => fetch(`/orchestrator/api/${path}`, { method, ...json, headers: {
+      'x-orchestrator-request': '1', ...json.headers, ...(token ? { authorization: `Bearer ${token}` } : {}),
+    } })
+    response = await send(method === 'GET' ? undefined : operatorToken)
+    if (response.status === 401 && method !== 'GET') {
+      operatorToken = window.prompt('Superagent operator token / 操作员令牌')?.trim() || undefined
+      if (operatorToken) response = await send(operatorToken)
+      if (response.status === 401) operatorToken = undefined
+    }
   } catch {
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }

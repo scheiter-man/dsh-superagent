@@ -134,7 +134,7 @@ export class Sessions {
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
-    if (role === 'worker') ctx.permissionPresets.set(result.agent.session, settings.executor.permissionPreset)
+    if (role === 'worker') this.applyWorkerPermission(result.agent)
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
@@ -186,7 +186,19 @@ export class Sessions {
   /** Delivers a message to the main Session once per request id, replacing an archived main Session first. */
   async promptMaster(requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }): Promise<void> {
     await this.replaceArchivedMaster()
-    await this.prompt(this.current, requestId, text, mode)
+    const target = this.current
+    const record = KV.runtime.masterDelivery(key(requestId))
+    const { store } = this.host
+    const delivery = store.get(record)
+    if (delivery?.delivered) return
+    // Check the previous inbox and history before retrying a delivery whose receipt did not commit before archival.
+    if (delivery && delivery.sessionId !== target && await this.holds(delivery.sessionId, requestId)) {
+      store.set(record, { ...delivery, delivered: true })
+      return
+    }
+    store.set(record, { sessionId: target, delivered: false })
+    await this.prompt(target, requestId, text, mode)
+    store.set(record, { sessionId: target, delivered: true })
   }
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
@@ -260,6 +272,11 @@ export class Sessions {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
   }
+  private applyWorkerPermission(agent: Agent): void {
+    const preset = this.host.store.settings().executor.permissionPreset
+    const permissions = this.ctx.permissionPresets
+    if (permissions.current?.(agent.session) !== preset) permissions.set(agent.session, preset)
+  }
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
@@ -267,7 +284,16 @@ export class Sessions {
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
+    if (ticket) this.applyWorkerPermission(agent)
     this.bindings.set(agent, binding)
+    const tools = host.tools(agent, ticket)
+    if (master) {
+      const routingTools = new Set(tools.map(tool => tool.name))
+      binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(({ name }) =>
+        routingTools.has(name) ? undefined : 'The router only has Superagent routing and query tools'))
+    } else {
+      binding.disposers.push(...this.workOnly(agent, ticket!.id))
+    }
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -289,16 +315,7 @@ export class Sessions {
     // Bail out if the agent was disposed while awaiting the skill scope.
     if (this.bindings.get(agent) !== binding) return
     const register = this.registerTool(agent, binding)
-    const tools = host.tools(agent, ticket)
     for (const tool of tools) register(tool.name, tool.description, tool.schema, tool.execute)
-    if (master) {
-      const routingTools = new Set(tools.map(tool => tool.name))
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(({ name }) =>
-        routingTools.has(name) ? undefined : 'The router only has Superagent routing and query tools'))
-    } else {
-      // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.
-      binding.disposers.push(...this.workOnly(agent, ticket!.id))
-    }
   }
   /**
    * An Executor Session's tools: only the profile's work tools, which DSH requires to be known, and none once its ticket

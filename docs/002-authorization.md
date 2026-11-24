@@ -27,7 +27,7 @@ The main Session receives a follow-up notice. While an Executor owns the message
 
 ### Handing back and releasing follow-ups
 
-An Executor hands a message back once when it asks for work beyond the Ticket's scope or belongs to another Ticket. The Ticket keeps its Subscription. If an attached Thread is unrelated, the Executor hands back the messages it owns there.
+An Executor hands a message back once when it asks for work beyond the Ticket's scope or belongs to another Ticket. A subscription created solely by the returned attachment is removed once all attachment requests on it have been handed back. Independent subscriptions remain.
 
 A message goes to a fresh Eval only after no Ticket still owns it. Its candidate includes the Executors' reasons. The gate judges it as an ordinary message on that Thread, and the main Session can accept it, attach it elsewhere or ignore it. Handing back a message the Ticket did not own, such as a bot message or one a person already sent to Eval, queues nothing.
 

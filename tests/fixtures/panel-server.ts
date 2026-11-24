@@ -292,6 +292,7 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'POST local/submit': { body: true, answer: ({ body }) => ({ request_id: body.request_id, desk: body.desk, ticket_id: 'local-test', trigger_id: 'local-trigger', duplicate: false }) },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
     const q = query.q ?? ''

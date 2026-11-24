@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, feishuConfigured, githubConfigured, githubOf, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, githubConfigured, githubOf, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -89,8 +89,6 @@ describe('setup', () => {
     // A partly set GitHub Source still has to resolve in full, so a missing repository is still reported.
     expect(githubConfigured({ cli: 'gh' })).toBe(true)
     expect(githubConfigured({ repository: 'acme/widgets' })).toBe(true)
-    expect(feishuConfigured({ cli: 'lark-cli' })).toBe(true)
-    expect(feishuConfigured({})).toBe(false)
     expect(() => githubOf({})).toThrow('no GitHub repository')
     expect(githubOf({ repository: 'acme/widgets', github: { cli: 'gh', login: 'agent-bot', noreply: 'n' } }).repository).toBe('acme/widgets')
   })

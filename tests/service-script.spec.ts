@@ -3,6 +3,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, utimesSync, writeFileSync }
   from 'node:fs'
 import { createServer, type Server } from 'node:http'
+import { DatabaseSync } from 'node:sqlite'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -232,3 +233,26 @@ it('does not signal a process that took the recorded service PID, and keeps a st
   expect(await run('stop', '--stop-timeout', '1')).toMatchObject({ code: 1, stderr: expect.stringContaining('Graceful stop timed out') })
   expect(existsSync(join(control('superagent'), 'manually-stopped'))).toBe(true)
 }, 20_000)
+
+it('stops a service launched by the macOS DSH app executable', async () => {
+  const pid = sleeper()
+  processes(`${pid} DeepSeek Harness /Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness --expose-internals /runtime/@deepseek-ai/dsh-desktop-host/lib/cli.js --profile one --no-open`)
+  expect(await status('one')).toMatchObject({ pids: [pid] })
+  expect(await run('stop', '--profile', 'one', '--stop-timeout', '3')).toMatchObject({ code: 0 })
+  expect(await status('one')).toMatchObject({ pids: [], manually_stopped: true })
+})
+
+it('backs up committed WAL data online, refuses overwrite, and works offline', async () => {
+  const source = join(root, 'orchestrator.sqlite'), target = join(root, 'snapshot.sqlite')
+  const db = new DatabaseSync(source)
+  try {
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE example (value TEXT); INSERT INTO example VALUES ('committed')")
+    expect(existsSync(`${source}-wal`)).toBe(true)
+    expect(await run('backup', '--state-dir', root, '--output', target)).toMatchObject({ code: 0 })
+    const copy = new DatabaseSync(target, { readOnly: true })
+    try { expect(copy.prepare('SELECT value FROM example').get()).toMatchObject({ value: 'committed' }) }
+    finally { copy.close() }
+    expect(await run('backup', '--state-dir', root, '--output', target)).toMatchObject({ code: 1, stderr: expect.stringContaining('already exists') })
+  } finally { db.close() }
+  expect(await run('backup', '--state-dir', root, '--output', join(root, 'offline.sqlite'))).toMatchObject({ code: 0 })
+})

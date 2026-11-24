@@ -1,6 +1,10 @@
 /** Default deployment and machine fixtures for tests. */
+import { createHash } from 'node:crypto'
 import type { Volatile } from '@deepseek-ai/cordis'
 import type { Deployment, Machine } from '../../src/deployment.ts'
+
+export const testAuthorization = `Bearer ${'test'.repeat(8)}`
+export const testOperatorHash = createHash('sha256').update(testAuthorization.slice(7)).digest('hex')
 
 /** Mutable Volatile reference for simulating live configuration updates. */
 export const reference = <T>(value: T): Volatile<T> & { set(next: T): void } => {

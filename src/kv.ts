@@ -30,7 +30,9 @@ export const KV = {
     /** The built-in text of a prompt part an override was edited from, by its `base`, which shows what an upgrade changed. */
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
-  runtime: { masterId: record<string>('master-id') },
+  runtime: { masterId: record<string>('master-id'),
+    masterDelivery: family<{ sessionId: string; delivered: boolean }>('master-delivery:') },
+  local: { submission: family<{ signature: string; receipt: { request_id: string; desk: string; ticket_id: string; trigger_id: string } }>('local-submission:') },
   executor: { prepared: family<{ directory: string; identity: string; baseline: string }, [ticket: string]>('workspace-prepared:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },

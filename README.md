@@ -10,11 +10,7 @@ It is also a way of working with an agent: **take as little human attention as p
 
 ## Setup
 
-Setup has many steps, so an agent does it with you. Ask your coding agent:
-
-> Read SETUP.md in this repository and set up dsh-superagent with me.
-
-It asks one short question at a time, shows the full plan once, and then installs and configures everything. [SETUP.md](SETUP.md) is what it follows.
+This fork targets DSH `0.2.2-rc.5`. Use a dedicated profile and choose the local-only, single-operator GitHub, or shared-repository flow in [SETUP.md](SETUP.md). The local CLI can submit to a Desk, pause and resume dispatch, stop the service, and make a consistent SQLite backup.
 
 ## Documentation
 
@@ -33,6 +29,13 @@ Read the numbered documents in order; each builds only on the ones before it.
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
+
+## Community ports
+
+- DSH 0.2.2 API adaptation, all-provider model picker, and archived-router recovery by huangchenbj. Sources: `51bbab8115e7dea6709d8a03ca0f3ac8e9c89409`, `06ef0620ddd35dccecbf054d6a8df18e34e9c97c`, and `5cb4a44d892170aa6dddb38edeb261393a59e046`.
+- Optional GitHub deployment adapted from Connor Qiao's `a11ccc2537a1c4f8e49c3d5359f2e7cd76411cbf`.
+
+The ports retain the source projects' MIT license terms.
 
 ## License
 

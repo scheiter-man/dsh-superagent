@@ -115,7 +115,11 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
   if ((stage.action !== 'blocked' && stage.action !== 'failed') || !summary) return undefined
   return { text: preview(summary.split('\n')[0]!), error: stage.action === 'failed' }
 }
-export function ticketSummary(ticket: Ticket) {
+export function ticketSummary(ticket: Ticket): { desk?: string } & ReturnType<typeof ticketSummaryFields> {
+  const desk = ticket.mandate.basis.source === 'local' ? attribute(ticket.mandate.basis.scope?.desk) : undefined
+  return { ...ticketSummaryFields(ticket), ...(desk ? { desk } : {}) }
+}
+function ticketSummaryFields(ticket: Ticket) {
   const stage = ticketStage(ticket)
   const note = ticketNote(ticket, stage)
   const state = liveTicket(ticket) ? 'open' as const : 'ended' as const
