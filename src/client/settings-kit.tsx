@@ -69,7 +69,7 @@ function SwitchRow({ label, hint, checked,
   </div>
 }
 type RoleModel = Settings['eval']['model']
-export function ModelField({ id, value, onChange }: { id: string; value: RoleModel; onChange: (next: RoleModel) => void }) {
+export function ModelField({ value, onChange }: { value: RoleModel; onChange: (next: RoleModel) => void }) {
   const { t, call } = usePanel()
   const [catalog, setCatalog] = useState<ApiResponse<'GET models'>>()
   const [error, setError] = useState<string>()
@@ -79,27 +79,48 @@ export function ModelField({ id, value, onChange }: { id: string; value: RoleMod
     const { provider, model, effort } = { ...current, ...next }
     onChange(provider.trim() || model.trim() || effort.trim() ? { provider, model, ...effort ? { reasoningEffort: effort } : {} } : null)
   }
-  const models = catalog?.groups.find(group => group.id === current.provider.trim())?.models ?? []
+  const groups = catalog?.groups ?? []
+  const modelsOf = (provider: string) => groups.find(group => group.id === provider.trim())?.models ?? []
+  const effortsOf = (provider: string, model: string) => modelsOf(provider).find(item => item.id === model.trim())?.reasoning?.efforts ?? []
+  const models = modelsOf(current.provider)
+  const efforts = effortsOf(current.provider, current.model)
   const fallback = catalog?.default
   const input = (name: keyof typeof current, label: string, placeholder: string) => <Field label={label}>
-    <Input list={`${id}-${name}s`} spellCheck={false} placeholder={placeholder} value={current[name]}
+    <Input spellCheck={false} placeholder={placeholder} value={current[name]}
       onChange={event => set({ [name]: event.target.value })} />
   </Field>
+  // A saved value the catalog does not list stays selectable, so opening the form never changes it.
+  type Choice = { readonly id: string; readonly name: string }
+  const options = (items: readonly Choice[], value: string) => [...items.map(item => <option key={item.id}
+    value={item.id}>{item.name === item.id ? item.id : `${item.name} (${item.id})`}</option>),
+  ...value && !items.some(item => item.id === value) ? [<option key={value} value={value}>{t('modelUnlisted', { id: value })}</option>] : []]
+  const select = (name: keyof typeof current, label: string, empty: string, items: readonly Choice[],
+    onPick: (next: string) => void, disabled = false) => <Field label={label}>
+    <select className="dt-select" value={current[name]} disabled={disabled} onChange={event => onPick(event.target.value)}>
+      <option value="">{empty}</option>{options(items, current[name])}
+    </select>
+  </Field>
+  // Picking a Provider keeps the model only when that Provider lists it; picking a model keeps the effort only when it offers it.
+  const pickProvider = (provider: string) => {
+    const model = modelsOf(provider).some(item => item.id === current.model) ? current.model : ''
+    set({ provider, model, effort: effortsOf(provider, model).some(item => item.id === current.effort) ? current.effort : '' })
+  }
+  const pickModel = (model: string) => set({ model,
+    effort: effortsOf(current.provider, model).some(item => item.id === current.effort) ? current.effort : '' })
   return <div className="dt-model">
     <Hint>{fallback ? t('defaultModel', { model: `${fallback.provider} / ${fallback.model}${fallback.reasoningEffort
       ? ` · ${fallback.reasoningEffort}` : ''}` }) : t('defaultModelUnavailable')}</Hint>
     {error && <p className="dt-error">{t('modelCatalogError', { error })}</p>}
-    <div className="dt-grid3">
+    {catalog?.failures.map(failure => <p key={failure.id} className="dt-error">{t('modelProviderFailed',
+      { provider: failure.name, error: failure.message })}</p>)}
+    {catalog ? <div className="dt-grid3">
+      {select('provider', t('modelProvider'), t('modelInherit'), groups, pickProvider)}
+      {select('model', t('modelName'), t('modelInherit'), models, pickModel, !current.provider)}
+      {select('effort', t('modelEffort'), t('modelEffortDefault'), efforts, effort => set({ effort }), !current.model)}
+    </div> : <div className="dt-grid3">
       {input('provider', t('modelProvider'), t('modelInherit'))}{input('model', t('modelName'), t('modelInherit'))}{input('effort',
         t('modelEffort'), t('modelEffortDefault'))}
-    </div>
-    <datalist id={`${id}-providers`}>{catalog?.groups.map(group => <option key={group.id}
-      value={group.id}>{group.name}</option>)}</datalist>
-    <datalist id={`${id}-models`}>{models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}</datalist>
-    <datalist id={`${id}-efforts`}>
-      {(models.find(model => model.id === current.model.trim())?.reasoning?.efforts ?? []).map(effort => <option key={effort.id}
-        value={effort.id}>{effort.name}</option>)}
-    </datalist>
+    </div>}
   </div>
 }
 
