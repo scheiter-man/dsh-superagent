@@ -105,21 +105,23 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     else parent?.steer(ended)
     child.settled.resolve()
   }
+  // DSH 0.2.2's subagent tree service: a worker is the root of its tree. An interrupt ends a child here, whose end is
+  // delivered to its parent before the tree's join returns, as DSH does.
   const service = {
-    waitForChildren: vi.fn(async (parent: { id: string }) => {
-      const live = [...children.values()].filter(child => child.parent === parent.id && child.live)
+    waitForTreeWork: vi.fn(async (root: { id: string }) => {
+      const live = [...children.values()].filter(child => child.parent === root.id && child.live)
       await Promise.all(live.map(child => child.settled.promise))
       return live.length > 0
     }),
-    listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
-    drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id)
+      .map(([childId]) => ({ kind: 'child' as const, id: childId }))),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
         for (const [id, child] of children) if (child.parent === parent.id) settle(id, false)
       }
     }),
-    interrupt: vi.fn((id: string) => { settle(id) }),
+    interrupt: vi.fn((id: string, _authority?: unknown) => { settle(id) }),
   }
   const spawn = (parent: string) => {
     if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')
@@ -231,10 +233,12 @@ export async function startRuntime(seed?: (store: Store) => void) {
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(resolveDefault), rename: vi.fn(async () => {}),
     prompt: vi.fn(() => { throw new Error('Plugin delivery must not use user RPC') }),
-    inspect: vi.fn(async () => ({ events: [] })),
   }
-  const reader = { read: async () => ({ events: [] }), [Symbol.asyncDispose]: async () => {} }
-  const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async () => reader) }
+  // Each Session's stored events, which `sessionPersistence.open(id).read` serves in pages.
+  const stored = new Map<string, unknown[]>()
+  const reader = (id: string) => ({ read: async (offset = 0, length = 512) => ({ events: (stored.get(id) ?? []).slice(offset, offset + length) }),
+    [Symbol.asyncDispose]: async () => {} })
+  const persistence = { flush: vi.fn(async () => {}), open: vi.fn(async (id: string) => reader(id)) }
   const webServer = { host: '127.0.0.1', port: 3082, register: (route: { handler: HttpHandler }) => { http = route.handler; return () => {} } }
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
@@ -293,7 +297,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const step = (sessionId: string) => { steps.get(sessionId)!() }
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
-  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
+  return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop, stored,
     jobs, subagents, step, claim }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

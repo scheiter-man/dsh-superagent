@@ -6,11 +6,12 @@ import { stopSubagents, untilQuiet } from '../src/executor/background.ts'
 import { jobRegistry } from './fixtures/host.ts'
 
 /** A context with DSH's job registry and subagents, and an idle worker agent with one live subagent, `child-1`. */
-function setup(waitForChildren: (agent: Agent) => Promise<boolean>, drainChildren: () => Promise<void> = async () => {}) {
+function setup(waitForTreeWork: (agent: Agent) => Promise<boolean>) {
   const jobs = jobRegistry()
   const agent = { id: 'worker-t1', status: 'idle', whenIdle: async () => {}, inbox: { nextTurn: [], nextStep: [] }, cancel: vi.fn() } as unknown as
     Agent & { status: string; cancel: ReturnType<typeof vi.fn> }
-  const subagents = { waitForChildren: vi.fn(waitForChildren), listChildren: async () => [{ id: 'child-1' }], drainChildren: vi.fn(drainChildren) }
+  const subagents = { waitForTreeWork: vi.fn(waitForTreeWork), interrupt: vi.fn(),
+    listDescendants: async () => [{ kind: 'child', id: 'child-1' }, { kind: 'diagnostic', id: 'child-2' }] }
   const services: Record<string, unknown> = { jobs: jobs.service, subagents }
   const ctx = { get: (name: string) => services[name], agents: { get: () => agent } } as unknown as Context
   return { ctx, agent, jobs, subagents }
@@ -59,11 +60,21 @@ it('joins a worker\'s subagents once for the looks that wait on them, as DSH can
     stop.abort()
     expect(await quiet).toBe(false)
   }
-  expect(subagents.waitForChildren).toHaveBeenCalledTimes(1)
+  expect(subagents.waitForTreeWork).toHaveBeenCalledTimes(1)
+})
+
+it('interrupts each live subagent and joins the tree, then cancels the turn their ends woke', async () => {
+  const { ctx, agent, subagents } = setup(async () => true)
+  await stopSubagents(ctx, agent, true)
+  // A diagnostic row, for a catalog DSH could not read, names no subagent.
+  expect(subagents.interrupt).toHaveBeenCalledTimes(1)
+  expect(subagents.interrupt).toHaveBeenCalledWith('child-1', { kind: 'ancestor', agent })
+  expect(subagents.waitForTreeWork.mock.invocationCallOrder[0]).toBeGreaterThan(subagents.interrupt.mock.invocationCallOrder[0]!)
+  expect(agent.cancel).toHaveBeenCalledWith({ kind: 'user' }, { keepInbox: true })
 })
 
 it('gives up a release of subagents that does not end within 10 seconds, and cancels the turn their ends woke', async () => {
-  const { ctx, agent } = setup(async () => false, () => new Promise(() => {}))
+  const { ctx, agent } = setup(() => new Promise(() => {}))
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   try {
     let stopped = false

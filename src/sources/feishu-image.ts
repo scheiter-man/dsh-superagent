@@ -24,9 +24,10 @@ export async function readAdmissionImage(agent: Agent, commands: Commands, ref: 
   const messageId = z.string().regex(/^om_[a-zA-Z0-9_-]+$/).parse(ref.messageId)
   const attachments = agent.ctx.get('attachments')
   if (!attachments) throw new Error('Image reading is unavailable: no attachment service is mounted')
-  const route = agent.session.requestHeader()?.config
-  const provider = route?.provider ?? agent.options.provider
-  const model = route?.model ?? agent.options.model
+  // The model the next step uses: a recorded selection, such as the role's model, then the last request, then the agent's options.
+  const route = agent.model.current()
+  const provider = route?.provider
+  const model = route?.model
   const llm = agent.ctx.get('llm')
   if (!llm || !provider || !model) throw new Error('Image reading is unavailable: the current model route is unresolved')
   const info = await llm.resolveModelInfo(provider, model, signal)

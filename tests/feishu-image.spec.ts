@@ -27,7 +27,7 @@ beforeEach(() => {
   const ctx = new Context()
   ctx.reflect.provide('attachments', { saveImage, imageLimits: { maxImageBytes: 100, maxMessageImageBytes: 100 } })
   ctx.reflect.provide('llm', { resolveModelInfo })
-  agent = { ctx, session: { requestHeader: () => ({ config: { provider: 'chosen-provider', model: 'chosen-model' } }) }, options: {} } as unknown as Agent
+  agent = { ctx, model: { current: () => ({ provider: 'chosen-provider', model: 'chosen-model' }) } } as unknown as Agent
   lark = vi.spyOn(Commands.prototype, 'lark').mockImplementation(async (args: string[], cwd?: string) => {
     expect(args).toEqual(['im', '+messages-resources-download', '--message-id', 'om_source', '--file-key', 'img_source', '--type', 'image', '--output', './image'])
     expect(cwd).toContain(directory)
