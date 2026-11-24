@@ -125,7 +125,8 @@ def operator_token(args):
         if not sys.stdin.isatty():
             raise RuntimeError('Set --token-file when running without a terminal.')
         return getpass.getpass('Superagent operator token: ').strip()
-    with Path(args.token_file).open('r', encoding='ascii') as file:
+    fd = os.open(args.token_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'r', encoding='ascii') as file:
         metadata = os.fstat(file.fileno())
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
             raise RuntimeError('The token file must be a private regular file owned by the operator.')

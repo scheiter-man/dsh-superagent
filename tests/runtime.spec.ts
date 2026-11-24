@@ -1148,6 +1148,8 @@ it('authenticates local intake, isolates same-Desk threads, and keeps idempotenc
   const otherId = (other.body as { ticket_id: string }).ticket_id
   expect(otherId).not.toBe(ticket_id)
   expect(local.store.threads.get(`local:${trigger_id}`)?.subscriptions).toEqual([ticket_id])
+  expect(() => local.engine.attach(otherId, trigger_id)).toThrow('original ticket')
+  expect(() => local.engine.followForContext(otherId, { source: 'local', id: trigger_id })).toThrow('original ticket')
   await local.idle()
   await runTool(`worker-${ticket_id}`, 'orchestrator_report', { state: 'ready', summary: 'Local delivery' })
   expect(local.store.tickets.get(ticket_id)?.ended?.outcome).toBe('completed')

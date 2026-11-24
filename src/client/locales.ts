@@ -701,6 +701,7 @@ const TEXT = {
   'userError.notRetryable': ['只有进行中的工单可以重试，而且仅当执行器最近一次报告为失败或受阻且此后没有人发过消息，或者向执行器送达输入失败时才可以。', USER_ERRORS.notRetryable[1]],
   'userError.sourceThread': ['这是工单开始时所在的线程，会保持订阅。', USER_ERRORS.sourceThread[1]],
   'userError.followedThread': ['这是工单自己的线程，例如它的 PR，会保持订阅。', USER_ERRORS.followedThread[1]],
+  'userError.localThreadPrivate': ['本地请求线程仅属于其原始工单。', USER_ERRORS.localThreadPrivate[1]],
   'userError.notFollowing': ['这个工单没有订阅那个线程。', USER_ERRORS.notFollowing[1]],
   'userError.questionWithResult': ['给人的问题不能同时是就绪的结果或回答，请分开报告。', USER_ERRORS.questionWithResult[1]],
   'userError.askerWithoutQuestion': ['提出问题的消息需要附上它提出的问题。', USER_ERRORS.askerWithoutQuestion[1]],

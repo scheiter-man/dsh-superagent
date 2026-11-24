@@ -147,7 +147,7 @@ scripts/dsh-superagent backup --state-dir <state-directory> --output <new-snapsh
 scripts/dsh-superagent stop
 ```
 
-- `submit` returns ticket and trigger IDs immediately. Reuse `--request-id` for an identical retry. A different payload for that ID is rejected. Each accepted request has its own thread, including when multiple requests use the same Desk. Continue the original delivery in its Worker session. A separate deliverable gets a new request ID. `--file -` reads stdin. Use `--token-file` or a terminal for the bearer token.
+- `submit` returns ticket and trigger IDs immediately. Reuse `--request-id` for an identical retry. A different payload for that ID is rejected. Each accepted request has its own thread, including when multiple requests use the same Desk. Superagent refuses to attach or follow a local request thread from another ticket. Continue the original delivery in its Worker session. A separate deliverable gets a new request ID. `--file -` reads stdin. Use `--token-file` or a terminal for the bearer token.
 - `pause` holds new dispatch and replies while the service is up. Running steps may finish. `stop` signals the matching named service, records a manual stop marker, and waits for it to exit. A timeout leaves the marker in place. Check status before choosing a stronger OS-level action.
 - `backup` uses SQLite's backup API for a consistent snapshot with committed WAL data, online or offline. It does not overwrite a destination. To restore the snapshot, first stop the service, preserve the existing state and open the backup in a fresh state directory. DSH session logs and worktree contents should be backed up separately if needed for full recovery.
 
@@ -174,7 +174,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
    git -C /home/me/src/widgets worktree add -b "agent/$DSH_SUPERAGENT_NAME" "$DSH_SUPERAGENT_DIR" "refs/dsh-superagent/$DSH_SUPERAGENT_TICKET"
    ```
 
-   List personal CLIs, such as one signed in to your own account, as blocked commands.
+   A linked Git worktree stores its Git metadata in the parent repository. If the Worker needs to commit under `workspace-write`, prepare a standalone clone inside the workspace or explicitly arrange narrowly scoped DSH write grants. List personal CLIs as blocked commands when using a separate agent identity.
 4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
 
 ### Management API

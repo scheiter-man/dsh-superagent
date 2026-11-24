@@ -106,6 +106,7 @@ export class Tickets extends EnginePart {
   attachable(ticketId: string, triggerId: string): Trigger {
     const trigger = this.repo.triggers.get(triggerId)
     if (!trigger) throw new UserError('unknownTrigger')
+    if (trigger.threads.some(ref => ref.source === 'local')) throw new UserError('localThreadPrivate')
     // A follow-up that reached a ticket goes elsewhere only once the workers that decide it hand it back.
     this.leftToWorkers(trigger)
     const current = this.require(ticketId)
@@ -421,6 +422,7 @@ export class Tickets extends EnginePart {
    */
   followForContext(ticketId: string, ref: ThreadRef): boolean {
     if (!liveTicket(this.require(ticketId))) throw new UserError('ticketEnded')
+    if (ref.source === 'local') throw new UserError('localThreadPrivate')
     if (this.thread(ref).subscriptions.includes(ticketId)) return false
     this.subscribe(ticketId, ref)
     const thread = this.thread(ref)
