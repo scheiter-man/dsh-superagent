@@ -29,7 +29,10 @@ export interface SessionsHost {
   readonly effects: Pick<Effects, 'enqueue' | 'handle' | 'idle' | 'pending'>
   /** The `models` health entry, which reports managed sessions waiting on a model-budget retry. */
   readonly health: HealthEntry
+  /** The main Session's id at startup; a replacement of an archived one is recorded under `KV.runtime.masterId`. */
   readonly masterId: string
+  /** The workspace directory a main Session is created in. */
+  readonly masterCwd: string
   readonly lifetime: AbortSignal
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
@@ -46,6 +49,8 @@ interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: 
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
+/** The main Session's title in DSH's session list. */
+const MASTER_TITLE = 'dsh-superagent orchestrator'
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /** DSH's agent preset registry selected `agentPreset` for a Session. */
@@ -96,12 +101,17 @@ export class Sessions {
   private readonly bindings = new Map<Agent, SessionBinding>()
   private readonly retryHealth = new RetryHealth()
   private readonly ctx: Context
+  /** The current main Session's id. */
+  private current: string
+  /** A replacement of the archived main Session in progress, which concurrent deliveries wait for. */
+  private replacing?: Promise<void>
   /** Registers ordered `relay` and `notice` effect handlers that deliver to the main Session. */
   constructor(private readonly host: SessionsHost) {
     this.ctx = host.context
+    this.current = host.masterId
     this.agentDelivery = new AgentDelivery(host.context)
     // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
+    host.effects.handle('relay', ({ text }, requestId) => this.promptMaster(requestId, text, 'steer'), { ordered: true })
     host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
@@ -124,7 +134,7 @@ export class Sessions {
     ctx.inject(['agentPresets'], child => {
       child.on('agent-preset/selected', (sessionId, preset) => {
         const ticketId = ticketOfSession(sessionId), agent = ctx.agents.get(sessionId as SessionId)
-        const ours = sessionId === this.host.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
+        const ours = sessionId === this.masterId ? ROUTER_PRESET : ticketId && this.host.store.tickets.get(ticketId) ? WORKER_PRESET : undefined
         if (!ours || preset === ours || !agent) return
         const presets = child.get('agentPresets') as { select(agent: Agent, preset: string): Promise<string> }
         presets.select(agent, ours).catch(() => {})
@@ -158,6 +168,51 @@ export class Sessions {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     return !('error' in result) && await this.agentDelivery.holds(result.agent, key(requestId))
   }
+  /** The current main Session's id, which changes when an archived main Session is replaced. */
+  get masterId(): string { return this.current }
+  /**
+   * Resolves or creates the main Session. A person may archive it in DSH's Web UI, after which DSH refuses every step it
+   * would take; an archived main Session is then left as it is and a new one, recorded under `KV.runtime.masterId`, takes
+   * its place. Concurrent callers share one replacement.
+   */
+  async ensureMaster(): Promise<Agent> {
+    await this.replaceArchivedMaster()
+    return this.ensure(this.current, this.host.masterCwd, MASTER_TITLE, 'orchestrator')
+  }
+  /** Replaces the main Session when it is archived; concurrent callers share one replacement. */
+  private async replaceArchivedMaster(): Promise<void> {
+    while (this.replacing) await this.replacing
+    if (!this.archived(this.current)) return
+    const replacement = this.replacing = this.replaceMaster().finally(() => { this.replacing = undefined })
+    await replacement
+  }
+  /** Whether DSH's workspace registry has `sessionId` archived; a registry that has not loaded yet archives nothing. */
+  private archived(sessionId: string): boolean {
+    try { return this.ctx.workspaceRegistry.archivedSessionIds?.includes(sessionId as SessionId) ?? false } catch { return false }
+  }
+  /**
+   * Records a new main Session id in place of the archived one and releases what was registered for the archived one. The id
+   * switches before the Session is created so its creation decorates it as the main Session; a failed creation switches
+   * back, and the delivery that asked retries.
+   */
+  private async replaceMaster(): Promise<void> {
+    const previous = this.current, at = new Date().toISOString()
+    this.current = `orchestrator-${key(previous, at)}`
+    let agent: Agent
+    try { agent = await this.ensure(this.current, this.host.masterCwd, MASTER_TITLE, 'orchestrator') }
+    catch (error) { this.current = previous; throw error }
+    this.host.store.set(KV.runtime.masterId, this.current)
+    const old = this.ctx.agents.get(previous as SessionId)
+    if (old) this.release(old)
+    this.ctx.logger.warn('dsh-superagent: the main Session %s was archived; %s replaces it', previous, this.current)
+    const text = JSON.stringify({ main_session_replaced: { previous, reason: 'archived' }, at })
+    await this.agentDelivery.send(agent, `replaced:${previous}`, text, { inject: 'Main Session replaced' }, this.host.lifetime)
+  }
+  /** Delivers a message to the main Session once per request id, replacing an archived main Session first. */
+  async promptMaster(requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }): Promise<void> {
+    await this.replaceArchivedMaster()
+    await this.prompt(this.current, requestId, text, mode)
+  }
   /** Deliver a message once per request id: to the next turn, the current one, or `inject`ed with its label without waking the agent. */
   async prompt(sessionId: string, requestId: string, text: string, mode: 'queue' | 'steer' | { inject: string }, authorize?: () => void,
     accepted?: () => void): Promise<void> {
@@ -176,9 +231,10 @@ export class Sessions {
     await this.host.effects.idle('notice')
     return this.host.effects.pending('notice', name) ? 'pending' : 'injected'
   }
-  /** Injects a notice into the main Session without waking it; no-op if the main Session does not exist yet. */
+  /** Injects a notice into the main Session without waking it, replacing an archived main Session first; no-op if the main Session does not exist yet. */
   private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {
-    const resolved = await this.ctx.sessionController.resolveAgent(this.host.masterId as SessionId)
+    await this.replaceArchivedMaster()
+    const resolved = await this.ctx.sessionController.resolveAgent(this.current as SessionId)
     if ('error' in resolved) return
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
@@ -232,7 +288,7 @@ export class Sessions {
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
     const host = this.host
-    const master = agent.id === host.masterId
+    const master = agent.id === this.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }

@@ -28,6 +28,8 @@ Executor Sessions run commands without approval as the operator's OS user. Their
 
 The main Session uses `dsh-superagent-router`, with the same 5-second shell and job-wait limits and a smaller tool set for routing. Sessions retain the preset selected at creation. Worker subagents use DeepSeek Harness's `standard` preset.
 
+DeepSeek Harness refuses every step of an archived Session. If someone archives the main Session in the Web UI, the next candidate, relay or notice for it creates a new main Session, records its id, and tells it which Session it replaced; this also happens at startup. The archived Session is left as it is, and unarchiving it does not bring it back as the main Session. An archived Executor Session is not replaced: its Ticket stays where it is until someone unarchives it.
+
 ### Background work and worker slots
 
 When a turn ends with shell jobs or subagents still running, the Ticket keeps its worker slot and stays working. It is not reported as waiting, and the main Session receives no waiting report. A completed job or subagent wakes the Executor with its result in the same slot. Once a turn ends with no background work, the Executor reports waiting normally.
