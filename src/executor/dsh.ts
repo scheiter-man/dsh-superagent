@@ -2,8 +2,8 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { mkdir, rmdir, stat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { lstat, mkdir, realpath, rmdir } from 'node:fs/promises'
+import { dirname, join, relative, isAbsolute } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
@@ -11,6 +11,7 @@ import type { Machine } from '../deployment.ts'
 import { runAsWorker, verifyDirectory } from '../infra/environment.ts'
 import type { Settings } from '../policy.ts'
 import type { Store } from '../app/store.ts'
+import { KV } from '../kv.ts'
 import { Later, type Effects } from '../app/effects.ts'
 import { executionRoot, type Variable } from '../app/execution-environment.ts'
 import type { Sessions } from '../app/sessions.ts'
@@ -36,10 +37,7 @@ const SHUTDOWN_STOP_MS = 10_000
 const SLOT_WAIT_MS = 5000
 /** True when an input comes from a person (a non-context human trigger or a direct text input such as a status request). */
 const fromPerson = (input?: TicketInput): boolean => input?.kind === 'trigger' ? !!input.human && !input.context : input?.kind === 'text'
-/**
- * Internal error thrown when a ticket's workspace prepare command fails during launch.
- * DshExecutor catches it to mark the ticket failed immediately rather than retrying automatically, because an existing directory counts as prepared and an automatic retry would treat whatever a failed prepare command left behind in the directory as a prepared workspace.
- */
+/** Workspace preparation failures require a human retry. */
 class PrepareFailed extends Error {}
 const PASSING = new RegExp(['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'UND_ERR', 'socket hang up', 'fetch failed',
   'network error', 'overloaded', 'rate limit', '\\b(?:408|429|50[0-4])\\b'].join('|'), 'i')
@@ -62,7 +60,7 @@ export interface ExecutorHost {
   /** Where the Executor reports what happened to Assignments and Inputs. */
   readonly engine: Pick<EngineForExecutor, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed' | 'report'
     | 'assignmentInterrupted'>
-  readonly store: Pick<Store, 'tickets' | 'triggers' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
+  readonly store: Pick<Store, 'tickets' | 'triggers' | 'get' | 'set' | 'settings' | 'atomic' | 'afterCommit'>
   /** Durable effect queue through which launches and input deliveries run. */
   readonly effects: Pick<Effects, 'enqueue' | 'handle'>
   /** The `worker` health entry, which reports whether background worker event handling failed. */
@@ -238,27 +236,64 @@ export class DshExecutor implements Executor {
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
   }
-  /**
-   * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
-   * execution environment variables, then verifies the directory as the worker sees it.
-   * A failed prepare command throws `PrepareFailed`, which is not retried automatically; an empty directory it left is removed, a non-empty one kept.
-   * @throws PrepareFailed with the command's output when the prepare command fails.
-   */
+  private async workspaceIdentity(directory: string): Promise<string | undefined> {
+    const entry = await lstat(directory, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error
+    })
+    if (!entry) return undefined
+    if (!entry.isDirectory()) throw new Error('The workspace must be a real directory')
+    const resolved = await realpath(directory)
+    const state = relative(resolved, await realpath(this.host.machine.stateDir))
+    if (!state || !isAbsolute(state) && state !== '..' && !state.startsWith('../')) {
+      throw new Error('A workspace cannot contain the Superagent state directory')
+    }
+    return key(resolved, String(entry.dev), String(entry.ino))
+  }
+  /** Prepare once, or verify that the ticket still owns the directory recorded in SQLite. */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
-    const directory = ticket.execution?.directory ?? ''
-    await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
-    const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
-    // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
-    const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
-      .catch(async (error: unknown) => {
-        // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
-        await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
-        throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
+    const directory = ticket.execution!.directory
+    const record = KV.executor.prepared(ticket.id)
+    try {
+      const prepared = this.host.store.get(record)
+      const existing = await this.workspaceIdentity(directory)
+      if (prepared && (prepared.directory !== directory || prepared.identity !== existing)) {
+        throw new Error('The verified workspace is missing or has been replaced. Restore the original directory or open a new ticket.')
+      }
+      const command = this.host.store.settings().executor.prepare.trim()
+      if (!prepared) {
+        // Only a previously started assignment is evidence for adopting a workspace from an older bundle.
+        const legacy = existing && ticket.assignments.some(assignment => assignment.startedAt)
+        if (existing && !legacy) throw new Error('An unverified directory already exists. Move it aside before retrying.')
+        if (!existing) {
+          await mkdir(dirname(directory), { recursive: true })
+          const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
+          const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+          if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+            .catch(async (error: unknown) => { await rmdir(directory).catch(() => {}); throw error })
+          await mkdir(directory, { recursive: true })
+        }
+      }
+      const identity = await this.workspaceIdentity(directory)
+      if (!identity || prepared && prepared.identity !== identity) throw new Error('The workspace was replaced during verification')
+      const subprocess = this.host.context.subprocess
+      const signal = this.host.lifetime
+      await verifyDirectory(directory, subprocess, signal)
+      if (prepared) return
+      const git = await lstat(join(directory, '.git')).then(() => true, (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return false
+        throw error
       })
-    await mkdir(directory, { recursive: true })
-    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+      const baseline = git
+        ? (await runAsWorker(subprocess, ['git', 'rev-parse', '--verify', 'HEAD'], directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))).trim()
+        : 'directory'
+      if (git && !/^[a-f0-9]{40,64}$/.test(baseline)) throw new Error('The workspace does not have a verifiable Git HEAD')
+      if (identity !== await this.workspaceIdentity(directory)) throw new Error('The workspace was replaced during verification')
+      this.host.lifetime.throwIfAborted()
+      this.host.store.set(record, { directory, identity, baseline })
+    } catch (error) {
+      if (error instanceof Later || this.host.closing()) throw error
+      throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -275,9 +310,7 @@ export class DshExecutor implements Executor {
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
       // Shutdown or pause re-queues the launch for resume, and transient network/provider errors retry with backoff.
-      // A failed prepare command is not retried automatically because an existing directory counts as prepared, so retrying
-      // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
-      // ticket is marked failed and waits until new human input or an explicit retry arrives.
+      // Preparation failures wait for human review rather than running the prepare command again automatically.
       if (this.host.closing() || error instanceof Later) throw error
       if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
       this.launchFailed(ticketId, assignmentId, error)
@@ -431,11 +464,7 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
-      await this.prepareDirectory(ticket)
-      if (!current()) return
-    }
+    await this.prepareDirectory(ticket)
     if (!current()) return
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')

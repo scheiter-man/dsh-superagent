@@ -328,6 +328,8 @@ const TEXT = {
   designNeeded: ['仍需产品／视觉设计决策', 'a product or design decision remains'],
   designNotNeeded: ['无需新增设计决策', 'no new design decision'],
   directionEvidence: ['方向证据：{evidence}', 'Evidence: {evidence}'],
+  workerPermission: ['Worker 权限预设', 'Worker permission preset'],
+  workerPermissionHint: ['默认限制工作区写入。权限在 Worker 创建或恢复时应用。', 'Defaults to workspace-confined writes. Applies when a worker is created or resumed.'],
   maxWorkers: ['并行工单数', 'Concurrent Tickets'],
   maxWorkersHint: ['超过并发上限的工单排队等待。', 'Tickets beyond the limit wait in a queue.'],
   'basis.sender': ['发起人', 'Sender'],

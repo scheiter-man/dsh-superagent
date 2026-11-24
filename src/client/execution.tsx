@@ -96,6 +96,13 @@ export function ExecutionSettings() {
           <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField value={value.model}
             onChange={model => edit({ model })} /></Section>
+          <Field label={t('workerPermission')} hint={t('workerPermissionHint')}>
+            <select className="dt-select" value={value.permissionPreset}
+              onChange={event => edit({ permissionPreset: event.target.value === 'danger-full-access' ? 'danger-full-access' : 'workspace-write' })}>
+              <option value="workspace-write">workspace-write</option>
+              <option value="danger-full-access">danger-full-access</option>
+            </select>
+          </Field>
           <Field label={t('maxWorkers')} hint={t('maxWorkersHint')}>
             <Input type="number" min={LIMITS.maxWorkers.min} max={LIMITS.maxWorkers.max} required value={value.maxWorkers}
               onChange={event => edit({ maxWorkers: event.target.value })} />

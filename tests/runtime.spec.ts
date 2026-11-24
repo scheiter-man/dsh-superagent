@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -785,9 +785,6 @@ it('keeps pages of Source reads, prompt previews and Feishu message links in mem
   expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: `trigger/${message.id}` })).toMatchObject({ source_url: link })
   // An AppLink is found by the links read since dsh-superagent started.
   expect((await api('GET', `search?q=${encodeURIComponent(link)}`)).body).toMatchObject({ items: [expect.objectContaining({ id: message.id })] })
-  const config = runtime.prompts.current().config
-  const { previews } = await runTool(runtime.masterId, 'orchestrator_prompts_save', { config, preview: true }) as { previews: { read: string }[] }
-  expect(await runTool(runtime.masterId, 'orchestrator_read', { resource: previews[0]!.read, offset: 4000 })).toMatchObject({ offset: 4000 })
   expect(runtime.store.keys('').filter(name => /-read:|source-link:|prompt-preview\//.test(name))).toEqual([])
 })
 
@@ -948,8 +945,7 @@ it('pauses and resumes processing as its own action, a setting outside every blo
   await expect(runtime.settings.save('executor', { ...draft, paused: false }, revision, 'panel')).rejects.toThrow('paused')
   await runtime.settings.save('executor', { ...draft, maxWorkers: 5 }, revision, 'panel')
   expect(runtime.store.settings()).toMatchObject({ paused: true, executor: { maxWorkers: 5 } })
-  // The orchestrator pauses and resumes the same way, through the settings tool's pause block.
-  await runTool(runtime.masterId, 'orchestrator_settings_save', { block: 'pause', value: { paused: false }, revision: 0 })
+  await runtime.settings.pause(false, 'panel')
   expect(runtime.store.settings().paused).toBe(false)
 })
 
@@ -1080,6 +1076,8 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   const runs = () => subprocess.spawn.mock.calls.map(([spec]) => spec as { argv: string[]; cwd: string; env?: Record<string, string> }).filter(spec => spec.argv[0] === 'sh')
   prepare('git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"')
   const { ticket } = await acceptedTicket()
+  expect(runtime.store.get(KV.executor.prepared(ticket.id))).toMatchObject({ directory: ticket.execution!.directory, baseline: 'directory' })
+  writeFileSync(join(ticket.execution!.directory, 'dirty'), 'keep')
   expect(runs()).toEqual([expect.objectContaining({ argv: ['sh', '-c', 'git -C /srv/widgets worktree add "$DSH_SUPERAGENT_DIR" -b "agent/$DSH_SUPERAGENT_NAME"'], cwd: join(directory, 'work'),
     env: expect.objectContaining({ DSH_SUPERAGENT_DIR: ticket.execution!.directory, DSH_SUPERAGENT_NAME: ticket.execution!.name, DSH_SUPERAGENT_GITHUB_REPOSITORY: 'acme/widgets', DSH_SUPERAGENT_FEISHU_CHAT: CHAT }) })])
   // A retry reuses the prepared directory.
@@ -1095,18 +1093,18 @@ it('runs the prepare command once for a new ticket, under the execution root wit
   expect(waitsForPerson(runtime.store.tickets.get(failed.ticket.id)!)).toBe(true)
 })
 
-it('counts a ticket whose directory the host prepared before prepare commands existed as prepared', async () => {
-  const { ticket, sessionId } = await acceptedTicket()
-  await runTool(sessionId, 'orchestrator_report', { state: 'failed', summary: 'offline' })
-  // A ticket from before prepare commands has its worktree.
-  const stored = runtime.store.tickets.get(ticket.id)!
-  runtime.store.tickets.save({ ...stored, execution: { ...stored.execution!, directory } })
-  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: 'exit 1' } })
-  subprocess.spawn.mockClear()
-  await runtime.engine.retryTicket(ticket.id)
+it('refuses to start in a non-empty directory left by failed preparation', async () => {
+  const command = 'exit 3'
+  answers[`sh -c ${command}`] = new Error('partial failure')
+  runtime.store.saveSettings({ ...runtime.store.settings(), executor: { ...runtime.store.settings().executor, prepare: command } })
+  const { ticket } = await acceptedTicket()
+  const workspace = ticket.execution!.directory
+  mkdirSync(workspace, { recursive: true })
+  writeFileSync(join(workspace, 'partial'), 'incomplete')
+  runtime.engine.retryTicket(ticket.id)
   await runtime.idle()
-  expect(subprocess.spawn.mock.calls.some(([spec]) => spec.argv[0] === 'sh')).toBe(false)
-  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.state).toBe('running')
+  expect(runtime.store.tickets.get(ticket.id)!.assignments.at(-1)!.report?.summary).toContain('unverified directory')
+  expect(runtime.store.get(KV.executor.prepared(ticket.id))).toBeUndefined()
 })
 
 it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, and the Feishu part has nothing to sync', async () => {
@@ -1490,68 +1488,14 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
-it('refuses the main Session a bash command that runs sleep and a long job wait, as reports arrive by themselves, and no worker', async () => {
-  const bash = (command: string) => ({ name: 'bash', arguments: { command, description: 'x' } })
+it('blocks inherited and operator tools on the router, including on a legacy preset', async () => {
   const main = guards.get(runtime.masterId)!
-  for (const command of ['sleep 60; echo done', 'cd x && sleep 5', 'gh pr checks 7 || sleep 30', 'echo a\nsleep 90', 'while true; do sleep 30; done',
-    '(sleep 5)', '/bin/sleep 240', 'while sleep 30; do gh pr checks 7; done', 'if sleep 5; then gh pr view 7; fi', '{ sleep 60; }', '! sleep 5',
-    'nohup sleep 60', 'exec sleep 60', 'time sleep 60', 'until sleep 1; do :; done', 'command sleep 5', 'env sleep 5'])
-    expect(main(bash(command)), command).toMatch(/^Reports, follow_up notices, new candidates and a background job's end/)
-  // A command that names sleep as data, not at a command position, runs.
-  for (const command of ['gh api repos/acme/widgets/pulls', 'echo "sleep"', 'grep sleep file', 'sleeper --help', 'command -v sleep'])
-    expect(main(bash(command)), command).toBeUndefined()
-  // A command that asks to hold the step longer than 30 seconds, however it waits, under any preset.
-  const timed = (command: string, args: { timeoutMs?: number; run_in_background?: boolean } = {}) =>
-    ({ name: 'bash', arguments: { command, description: 'x', ...args } })
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 120_000 }))).toMatch(/^Reports/)
-  expect(main(timed("python3 -c 'import time;time.sleep(240)'", { timeoutMs: 600_000 }))).toMatch(/^Reports/)
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
-  // Under the router preset, the shell moves a command without a timeout to a background job after 5 seconds, and a job
-  // wait without one ends after 5 seconds too; a longer job wait waits for nothing that arrives that way.
-  expect(main(timed('gh pr checks 7 --watch'))).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 30_000 } })).toMatch(/^Reports/)
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j' } })).toBeUndefined()
-  // A main Session created before runs under standard, whose shell waits 60 seconds by default and whose job waits last 30:
-  // a command without a timeout runs in the background or names one, and a job wait names one.
-  ;(agents.get(runtime.masterId) as unknown as { session: { header: { agentPreset: string } } }).session.header = { agentPreset: 'standard' }
-  expect(main(timed('gh pr checks 7 --watch'))).toMatch(/^This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000/)
-  expect(main(timed('gh pr checks 7 --watch', { run_in_background: true }))).toBeUndefined()
-  expect(main(timed('gh api repos/acme/widgets/pulls', { timeoutMs: 20_000 }))).toBeUndefined()
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true } })).toMatch(/^Reports/)
-  expect(main({ name: 'job_output', arguments: { job_id: 'j', wait: true, timeout_ms: 5_000 } })).toBeUndefined()
-  // A worker waits for its own work as it needs.
-  const { sessionId } = await acceptedTicket()
-  expect(guards.get(sessionId)!(bash('sleep 60'))).toBeUndefined()
-  // The main Session's role says so.
-  expect(masterPrompt).toContain('Worker reports, follow_up notices, new candidates and a background job\'s end, with its output, arrive by themselves as messages')
-})
-
-it('reads the main Session\'s preset from a registry with or without presetForSession, and takes standard\'s caps when it cannot', async () => {
-  const watch = { name: 'bash', arguments: { command: 'gh pr checks 7 --watch', description: 'x' } }
-  const route = { name: 'orchestrator_route', arguments: { decisions: [] } }
-  const guard = async (registry: Record<string, unknown>, projections?: Record<string, unknown>) => {
-    services.agentPresets = registry
-    if (projections) services.sessionProjections = projections; else delete services.sessionProjections
-    await (await restart()).ready
-    return guards.get(runtime.masterId)!
+  for (const name of ['bash', 'pwsh', 'write', 'edit', 'job_output', 'orchestrator_settings_save', 'orchestrator_prompts_save']) {
+    expect(main({ name, arguments: {} })).toMatch(/only has Superagent routing and query tools/)
   }
-  // A released DSH's registry has no presetForSession: the projection says standard, so standard's caps apply, and the
-  // other tools run.
-  let main = await guard({ select: vi.fn() }, { stateOf: vi.fn((_session: unknown, key: string) => key === 'agentPreset' ? 'standard' : undefined) })
-  expect(main(route)).toBeUndefined()
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
-  // Without the projection either, the preset it was created with counts: the router preset.
-  main = await guard({ select: vi.fn() })
-  expect([main(route), main(watch)]).toEqual([undefined, undefined])
-  // The registry says standard though the Session was created with the router preset: standard's caps apply.
-  main = await guard({ select: vi.fn(), presetForSession: () => 'standard' })
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
-  // A registry that fails is read as standard, the safer caps, and the guard does not throw.
-  main = await guard({ select: vi.fn(), presetForSession: () => { throw new Error('no projection') } })
-  expect(main(route)).toBeUndefined()
-  expect(main(watch)).toMatch(/^This shell waits up to 60 seconds by default/)
+  expect(main({ name: 'orchestrator_route', arguments: {} })).toBeUndefined()
+  const { sessionId } = await acceptedTicket()
+  expect(guards.get(sessionId)!({ name: 'bash', arguments: {} })).toBeUndefined()
 })
 
 it('refuses an ended ticket\'s worker its tools, and restricts the main Session to the tools it may use', async () => {
@@ -1559,7 +1503,7 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
+  expect(restricts.get(runtime.masterId)).toEqual([{ allow: [] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])

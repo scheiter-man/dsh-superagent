@@ -119,7 +119,7 @@ export class Tickets extends EnginePart {
    * message as its ticket's takes it as a new Input, which wakes an ended ticket as any attached message does.
    */
   attach(ticketId: string, trigger: Trigger, note?: string): void {
-    for (const ref of trigger.threads) this.subscribe(ticketId, ref)
+    for (const ref of trigger.threads) this.subscribe(ticketId, ref, trigger.id)
     // A person's sending it to Eval, which routed it here, is over, and so is the ticket's reading it for context only.
     const current: TriggerDisposition = this.repo.triggers.disposition(trigger.id) ?? { fanout: [], at: this.now() }
     const { context, requeued, ...disposition } = current
@@ -178,6 +178,20 @@ export class Tickets extends EnginePart {
     this.options.executor.start(ticket, assignment)
     return ticket
   }
+  /** Remove a subscription when all of its original attachment requests were handed back. */
+  releaseAttachment(ticketId: string, trigger: Trigger, reason: string): void {
+    for (const ref of trigger.threads) {
+      const thread = this.repo.threads.get(threadKey(ref))
+      const attached = thread?.attachedBy?.[ticketId]
+      if (!thread || !attached?.includes(trigger.id)) continue
+      const remaining = attached.filter(id => id !== trigger.id)
+      if (!remaining.length) this.dropSubscriptions(thread.key, 'executor', ticketId, reason)
+      else {
+        thread.attachedBy![ticketId] = remaining
+        this.repo.threads.save(thread)
+      }
+    }
+  }
   /**
    * Drops a ticket's Subscription to a Thread its worker found unrelated, and hands back, with `reason`, the person's messages there that the ticket decides.
    * @throws UserError when the ticket is unknown, or `thread` is an origin thread, a bound `follows` thread, or not subscribed.
@@ -216,6 +230,7 @@ export class Tickets extends EnginePart {
     const tickets = current?.subscriptions.filter(id => ticketId === undefined || id === ticketId) ?? []
     if (!current || !tickets.length) return false
     current.subscriptions = current.subscriptions.filter(id => !tickets.includes(id))
+    for (const id of tickets) delete current.attachedBy?.[id]
     this.repo.threads.save(current)
     for (const id of tickets) {
       const ticket = this.repo.tickets.get(id)
@@ -414,9 +429,14 @@ export class Tickets extends EnginePart {
     return true
   }
   /** Subscribe a ticket to a Thread; later Triggers on it reach the ticket as Inputs, as the ticket's own once it was for context. */
-  private subscribe(ticketId: string, ref: ThreadRef): void {
+  private subscribe(ticketId: string, ref: ThreadRef, attached?: string): void {
     const thread = this.thread(ref)
-    if (!thread.subscriptions.includes(ticketId)) { thread.subscriptions.push(ticketId); this.emit('thread.subscribed', { threadKey: thread.key, ticketId }) }
+    const already = thread.subscriptions.includes(ticketId)
+    if (attached && (!already || thread.attachedBy?.[ticketId])) {
+      const attachments = thread.attachedBy ??= {}
+      attachments[ticketId] = [...new Set([...(attachments[ticketId] ?? []), attached])]
+    } else if (!attached) delete thread.attachedBy?.[ticketId]
+    if (!already) { thread.subscriptions.push(ticketId); this.emit('thread.subscribed', { threadKey: thread.key, ticketId }) }
     if (thread.context?.includes(ticketId)) thread.context = thread.context.filter(id => id !== ticketId)
     this.repo.threads.save(thread)
   }

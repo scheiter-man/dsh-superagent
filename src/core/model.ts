@@ -162,6 +162,8 @@ export interface Thread {
   lastAt?: string
   /** Tickets subscribed to this thread; live ones receive every trigger as context through fan-out. */
   subscriptions: string[]
+  /** Subscriptions created solely by routing these triggers to a ticket. */
+  attachedBy?: Record<string, string[]>
   /**
    * The subscribed tickets whose Executor follows the thread for read-only context, such as an Issue or another pull request
    * it found: its messages reach them, but grant nothing, and a person's message there resumes none of them that ended.

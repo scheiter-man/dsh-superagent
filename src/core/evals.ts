@@ -176,15 +176,18 @@ export class Evals extends EnginePart {
   /**
    * Record that a ticket's Executor hands back a Trigger that reached it as beyond the ticket, and queue it for a fresh Eval
    * when the ticket decided it and no other ticket still does (see `handBack`): the gate judges it as any message on its
-   * Thread, and its candidate carries the reasons, so no requeue notice comes before it. The ticket keeps its Subscription,
-   * and hands a Trigger back once.
+   * Thread, and its candidate carries the reasons, so no requeue notice comes before it. A subscription created only by
+   * the returned attachment is removed. The ticket hands a Trigger back once.
    * @returns whether it was queued: false while another ticket decides it, and for one the ticket did not decide.
    */
   handback(ticketId: string, triggerId: string, reason: string): boolean {
     const ticket = this.require(ticketId)
     if (!ticket.inputs.some(input => input.kind === 'trigger' && input.triggerId === triggerId)) throw new UserError('notReached')
     if (this.repo.triggers.disposition(triggerId)?.handbacks?.some(item => item.ticketId === ticketId)) throw new UserError('handedBack')
-    return this.handBack(ticketId, this.repo.triggers.get(triggerId)!, reason)
+    const trigger = this.repo.triggers.get(triggerId)!
+    const queued = this.handBack(ticketId, trigger, reason)
+    this.tickets.releaseAttachment(ticketId, trigger, reason)
+    return queued
   }
   /**
    * Marks an `unavailable` Decision dismissed so the overview lists it no more.
