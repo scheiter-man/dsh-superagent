@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { Config, executable, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
+import { Config, executable, feishuConfigured, githubConfigured, githubOf, machineOf, resolveDeployment, resolveFeishuBot, type Machine, type Probe } from '../src/deployment.ts'
 import { gitEnv } from './fixtures/git.ts'
 
 const exec = promisify(execFile)
@@ -82,6 +82,17 @@ describe('setup', () => {
     await needs('github', 'repositoryUnreadable', { account: 'Agent-Bot', repository: 'acme/widgets', output }, { repository, cli: unreadable })
     await needs('github', 'agentCliNoAccount', {}, { repository, cli: program(join(dir, 'bin', 'gh-anonymous'), `echo '{}'`) })
     expect(() => executable('nothing-here', join(dir, 'bin'))).toThrow('nothing-here is not an executable file on PATH')
+  })
+  it('works from Feishu alone only when the GitHub Source names neither a repository nor a CLI', () => {
+    expect(githubConfigured(undefined)).toBe(false)
+    expect(githubConfigured({ repository: '', cli: '' })).toBe(false)
+    // A partly set GitHub Source still has to resolve in full, so a missing repository is still reported.
+    expect(githubConfigured({ cli: 'gh' })).toBe(true)
+    expect(githubConfigured({ repository: 'acme/widgets' })).toBe(true)
+    expect(feishuConfigured({ cli: 'lark-cli' })).toBe(true)
+    expect(feishuConfigured({})).toBe(false)
+    expect(() => githubOf({})).toThrow('no GitHub repository')
+    expect(githubOf({ repository: 'acme/widgets', github: { cli: 'gh', login: 'agent-bot', noreply: 'n' } }).repository).toBe('acme/widgets')
   })
   it('reads the Feishu bot from a bot-only lark-cli, or finds none when the Feishu Source names no CLI', async () => {
     expect(await resolveFeishuBot(machine(), {}, probe, path)).toBeUndefined()

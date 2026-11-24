@@ -864,6 +864,28 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   expect(next.feishuProblem).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
 })
 
+it('allows optional GitHub and keeps local setup available independently of Feishu', async () => {
+  const valid = { ...answers }
+  subprocess.spawn.mockClear()
+  const next = await restart({}, { github: { repository: '', cli: '' } })
+  await next.ready
+  expect(next.configured()).toBe(true)
+  expect(next.setupProblem).toBeUndefined()
+  expect(next.deployment.repository).toBeUndefined()
+  expect(next.deployment.github).toBeUndefined()
+  expect(next.deployment.feishu).toMatchObject({ botId: 'ou_bot' })
+  // No GitHub account is probed, and workers get a gh that says why it is missing.
+  expect(subprocess.spawn.mock.calls.map(([spec]) => spec.argv).some(argv => argv.includes(AGENT()))).toBe(false)
+  expect(readFileSync(join(directory, 'worker-bin', 'gh'), 'utf8')).toContain('no GitHub repository')
+  expect(readFileSync(join(directory, 'worker-gitconfig'), 'utf8')).not.toContain('github.com')
+  answers = { ...valid, [`${BOT()} config strict-mode`]: 'strict-mode: off (source: profile)' }
+  const broken = await restart({}, { github: { repository: '', cli: '' } })
+  await broken.ready
+  expect(broken.configured()).toBe(true)
+  expect(broken.feishuProblem).toMatchObject({ place: 'feishu', code: 'feishuUserIdentity', values: { mode: 'off' } })
+  answers = valid
+})
+
 it('reports a failure to write the agent environment as environmentFailed and leaves this process\'s environment as it was', async () => {
   await runtime.stop()
   // The shim directory cannot be made: a file has its name.

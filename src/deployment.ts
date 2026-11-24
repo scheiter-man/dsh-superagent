@@ -50,11 +50,29 @@ export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
 
+/**
+ * The resolved installation. `repository` and `github` are absent when the GitHub Source is left unconfigured.
+ */
 export interface Deployment extends Machine {
-  repository: string
-  github: { cli: string; login: string; noreply: string }
+  repository?: string
+  github?: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
 }
+/** Whether the GitHub Source names a repository or an account CLI; a partly configured GitHub Source still has to resolve in full. */
+export const githubConfigured = (github: unknown): boolean => {
+  const accounts = GithubAccountsSchema.parse(github ?? {})
+  return accounts.repository !== '' || accounts.cli !== ''
+}
+/**
+ * The repository and GitHub account, for code that runs only on the GitHub side of an installation.
+ * @throws when no GitHub repository is configured.
+ */
+export function githubOf(deployment: Pick<Deployment, 'repository' | 'github'>): { repository: string; github: NonNullable<Deployment['github']> } {
+  if (!deployment.repository || !deployment.github) throw new Error('This installation has no GitHub repository')
+  return { repository: deployment.repository, github: deployment.github }
+}
+/** Whether the Feishu Source names a bot CLI. */
+export const feishuConfigured = (feishu: unknown): boolean => FeishuBotSchema.parse(feishu ?? {}).cli !== ''
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 
 /** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
