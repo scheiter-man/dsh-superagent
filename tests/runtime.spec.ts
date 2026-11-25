@@ -1540,14 +1540,17 @@ it('fails a ticket at once on a worker error that is not passing, and relays it'
   expect(relays(runtime.masterId).at(-1)).toMatchObject({ kind: 'worker_report', ticket: { ticket_id: ticket.id }, state: 'failed' })
 })
 
-it('blocks inherited and operator tools on the router, including on a legacy preset', async () => {
+it('blocks write/operator tools and sleep waits on the router while preserving read and non-sleeping shell inspection', async () => {
   const main = guards.get(runtime.masterId)!
-  for (const name of ['bash', 'pwsh', 'write', 'edit', 'job_output', 'orchestrator_settings_save', 'orchestrator_prompts_save']) {
-    expect(main({ name, arguments: {} })).toMatch(/only has Superagent routing and query tools/)
+  for (const name of ['write', 'edit', 'orchestrator_settings_save', 'orchestrator_prompts_save']) {
+    expect(main({ name, arguments: {} })).toMatch(/only has read, shell\/job inspection, skill and Superagent routing tools/)
   }
+  expect(main({ name: 'bash', arguments: { command: 'sleep 30', description: 'x' } })).toMatch(/^Reports, follow_up notices/)
+  expect(main({ name: 'bash', arguments: { command: 'git status -sb', description: 'x', timeoutMs: 5000 } })).toBeUndefined()
+  expect(main({ name: 'read', arguments: {} })).toBeUndefined()
   expect(main({ name: 'orchestrator_route', arguments: {} })).toBeUndefined()
   const { sessionId } = await acceptedTicket()
-  expect(guards.get(sessionId)!({ name: 'bash', arguments: {} })).toBeUndefined()
+  expect(guards.get(sessionId)!({ name: 'bash', arguments: { command: 'sleep 30' } })).toBeUndefined()
 })
 
 it('refuses an ended ticket\'s worker its tools, and restricts the main Session to the tools it may use', async () => {
@@ -1555,7 +1558,7 @@ it('refuses an ended ticket\'s worker its tools, and restricts the main Session 
   expect(guards.get(sessionId)!()).toBeUndefined()
   runtime.engine.stopTicket(ticket.id)
   expect(guards.get(sessionId)!()).toBe('Ticket ended; new work needs a new authorized ticket')
-  expect(restricts.get(runtime.masterId)).toEqual([{ allow: [] }])
+  expect(restricts.get(runtime.masterId)).toEqual([{ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }])
   // A worker keeps only the profile's work tools: none that ask a person, change the profile, schedule or start work outside
   // the worker slots, reach other Sessions or edit documents, whenever they were registered.
   expect(restricts.get(sessionId)).toEqual([{ allow: ['read', 'read_image', 'grep', 'bash', 'job_output', 'job_list', 'job_kill', 'web_search', 'skill'] }])

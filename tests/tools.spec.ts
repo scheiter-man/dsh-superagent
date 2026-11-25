@@ -77,7 +77,7 @@ it('exposes settings for reading without registering operator management tools',
   for (const name of ['orchestrator_settings_save', 'orchestrator_policy_sync', 'orchestrator_prompts_save']) {
     expect(names.has(name)).toBe(false)
   }
-  expect(await read('settings')).toMatchObject({ executor: { value: { permissionPreset: 'workspace-write' } } })
+  expect(await read('settings')).toMatchObject({ executor: { value: { permissionPreset: 'danger-full-access' } } })
 })
 
 it('keeps the main Session\'s resources from an Executor Session, which lists only its own', async () => {

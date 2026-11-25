@@ -65,6 +65,25 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+const ROUTER_TOOLS = ['skill', 'bash', 'pwsh', 'read', 'read_image', 'job_output', 'job_list', 'job_kill']
+/** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
+const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
+  + 'end the turn instead of waiting for them.'
+/** What a main Session under `standard` is told when its command would wait the shell's default. */
+const DEFAULT_WAIT = 'This shell waits up to 60 seconds by default: pass timeoutMs of at most 30000, or run_in_background, '
+  + 'as a waiting step holds back new candidates.'
+/** `sleep` at a command position: the start, after ; & | ( { ! ` or a newline, or after a keyword or a command that runs it. */
+const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|nohup|command|env)\s)\s*(?:\S*\/)?sleep\b/
+function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
+  const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
+  if (name === 'bash' || name === 'pwsh') {
+    const sleeps = typeof args.command === 'string' && SLEEP.test(args.command)
+    if (sleeps || typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000) return NO_WAIT
+    if (args.timeoutMs === undefined && args.run_in_background !== true && !routed()) return DEFAULT_WAIT
+  }
+  if (name === 'job_output' && args.wait === true && (typeof args.timeout_ms === 'number' ? args.timeout_ms > 5_000 : !routed())) return NO_WAIT
+  return undefined
+}
 /**
  * Creates and decorates orchestrator and worker DSH `Agent` sessions with role models, system prompt sections from `Prompts`, runtime skills, and restricted tool sets.
  * `Runtime`, `DshExecutor`, `MasterAssessor`, `Settings`, and management routes/tools use it to ensure sessions, deliver deduplicated messages via `AgentDelivery`, and process ordered `relay` and `notice` effects.
@@ -134,7 +153,7 @@ export class Sessions {
     const settings = this.host.store.settings()
     await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await this.decorate(result.agent)
-    if (role === 'worker') this.applyWorkerPermission(result.agent)
+    this.applyRolePermission(result.agent, role)
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
     return result.agent
   }
@@ -272,10 +291,19 @@ export class Sessions {
     const ticketId = ticketOfSession(agent.id)
     return ticketId === undefined ? undefined : this.host.store.tickets.get(ticketId)
   }
-  private applyWorkerPermission(agent: Agent): void {
-    const preset = this.host.store.settings().executor.permissionPreset
+  private applyRolePermission(agent: Agent, role: 'orchestrator' | 'worker'): void {
+    const preset = role === 'orchestrator' ? 'danger-full-access' : this.host.store.settings().executor.permissionPreset
     const permissions = this.ctx.permissionPresets
     if (permissions.current?.(agent.session) !== preset) permissions.set(agent.session, preset)
+  }
+  private routed(agent: Agent): boolean {
+    try {
+      const presets = this.ctx.get('agentPresets') as { presetForSession?: (session: Agent['session']) => string | null } | undefined
+      const projections = this.ctx.get('sessionProjections') as { stateOf?: (session: Agent['session'], key: string) => unknown } | undefined
+      const selected = typeof presets?.presetForSession === 'function' ? presets.presetForSession(agent.session)
+        : projections?.stateOf?.(agent.session, 'agentPreset')
+      return (selected ?? agent.session.header.agentPreset) === ROUTER_PRESET
+    } catch { return false }
   }
   private async decorate(agent: Agent): Promise<void> {
     if (this.bindings.has(agent)) return
@@ -284,13 +312,19 @@ export class Sessions {
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
     const binding: SessionBinding = { disposers: [] }
-    if (ticket) this.applyWorkerPermission(agent)
+    this.applyRolePermission(agent, master ? 'orchestrator' : 'worker')
     this.bindings.set(agent, binding)
     const tools = host.tools(agent, ticket)
     if (master) {
-      const routingTools = new Set(tools.map(tool => tool.name))
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: [] }), agent.ctx.tools.guard(({ name }) =>
-        routingTools.has(name) ? undefined : 'The router only has Superagent routing and query tools'))
+      const parent = scopeParentOf(agent)
+      const allow = ROUTER_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+      const allowed = new Set([...allow, ...tools.map(tool => tool.name)])
+      binding.disposers.push(
+        agent.ctx.tools.restrict({ allow }),
+        agent.ctx.tools.guard(execution => allowed.has(execution.name)
+          ? noWait(execution, () => this.routed(agent))
+          : 'The router only has read, shell/job inspection, skill and Superagent routing tools'),
+      )
     } else {
       binding.disposers.push(...this.workOnly(agent, ticket!.id))
     }
