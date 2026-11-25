@@ -99,7 +99,10 @@ function SearchResults({ result, query, onClose }: { result: SearchView; query: 
 }
 
 function Header({ masterId }: { masterId: string | undefined }) {
-  const { t, call, openSession, notify } = usePanel()
+  const { t, call, openSession, notify, activeProjectId, selectProject } = usePanel()
+  const { projects } = usePanelData()
+  const activeProjects = projects?.items.filter(project => !project.archived) ?? []
+  const project = activeProjects.find(item => item.id === (activeProjectId === 'all' ? projects?.defaultId : activeProjectId))
   const [glossary, setGlossary] = useState(false)
   const [query, setQuery] = useState('')
   const [result, setResult] = useState<{ query: string; value: SearchView }>()
@@ -118,11 +121,12 @@ function Header({ masterId }: { masterId: string | undefined }) {
     const text = query.trim()
     if (!text) { show(); return }
     const request = ++latest.current
-    call('GET search', { query: { q: text } }).then(value => { if (request === latest.current) setResult({ query: text, value }) },
+    call('GET search', { query: { q: text, ...(activeProjectId !== 'all' ? { project: activeProjectId } : {}) } }).then(value => { if (request === latest.current) setResult({ query: text, value }) },
       failure => { if (request === latest.current) notify(errorText(failure)) })
   }
   return <header className="dt-head">
-    <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
+    <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1>{activeProjects.length > 0 && <select className="dt-select dt-project-switcher" aria-label={t('projectLabel')} value={activeProjectId} onChange={event => { show(); selectProject(event.target.value) }}>
+      <option value="all">{t('projectAll')}</option>{activeProjects.map(item => <option key={item.id} value={item.id}>{item.name} ({item.active})</option>)}</select>}</div>
     <div className="dt-toolbar">
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
@@ -131,8 +135,8 @@ function Header({ masterId }: { masterId: string | undefined }) {
       </form>
       <Button variant="ghost" size="sm" icon={<Icon name="question" />} aria-label={t('glossary')} title={t('glossary')} aria-haspopup="dialog"
         onClick={() => setGlossary(true)} />
-      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!masterId}
-        onClick={() => { if (masterId) openSession(masterId).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}</Button>
+      <Button variant="outline" size="sm" icon={<Icon name="session" size={14} />} disabled={!project && !masterId}
+        onClick={() => { void (project ? call('POST projects/:id/router', { id: project.id }).then(result => openSession(result.masterId)) : masterId ? openSession(masterId) : Promise.resolve()).catch(failure => notify(errorText(failure))) }}>{t('openMaster')}{project ? ` · ${project.name}` : ''}</Button>
     </div>
     <Glossary open={glossary} onClose={() => setGlossary(false)} />
   </header>

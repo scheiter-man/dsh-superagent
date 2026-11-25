@@ -32,7 +32,7 @@ export const KV = {
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id'),
     masterDelivery: family<{ sessionId: string; delivered: boolean }>('master-delivery:') },
-  local: { submission: family<{ signature: string; receipt: { request_id: string; desk: string; ticket_id: string; trigger_id: string } }>('local-submission:') },
+  local: { submission: family<{ signature: string; receipt: { request_id: string; desk: string; project_id?: string; ticket_id: string; trigger_id: string } }>('local-submission:') },
   executor: { prepared: family<{ directory: string; identity: string; baseline: string }, [ticket: string]>('workspace-prepared:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },

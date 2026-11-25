@@ -8,7 +8,7 @@ import { promptsNotice } from './notices.ts'
 import type { Sessions } from './sessions.ts'
 import type { Store } from './store.ts'
 import { Versions } from './versions.ts'
-import { KV } from '../kv.ts'
+import { family, record, KV } from '../kv.ts'
 
 /** Prompt sections the team writes; the built-in parts follow dsh-superagent's text until the team overrides them. */
 export const TEAM_SECTIONS = ['communication', 'scope', 'delivery'] as const
@@ -135,8 +135,9 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean) {
-    this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
+    private readonly feishu: () => boolean, projectId?: string) {
+    this.versions = projectId ? new Versions(store, record<number>(`project-prompt-revision:${projectId}`), family<PromptVersion, [number]>(`project-prompt:${projectId}:`))
+      : new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {

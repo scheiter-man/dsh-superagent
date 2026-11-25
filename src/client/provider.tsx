@@ -1,3 +1,4 @@
+import type { ApiResponse } from '../app/api.ts'
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Button, Input } from './controls.tsx'
@@ -16,6 +17,8 @@ export interface PanelContext {
   openSession: (sessionId: string) => Promise<void>
   notify: (text: string) => void
   restart: () => void
+  activeProjectId: string
+  selectProject(id: string): void
 }
 export interface PanelData {
   state: StateView | undefined
@@ -26,6 +29,8 @@ export interface PanelData {
   running: number
   /** Incremented each time dsh-superagent recovers from a restart so dependent views refetch. */
   restarts: number
+  projects?: ApiResponse<'GET projects'>
+  reloadProjects(): Promise<void>
 }
 const Panel = createContext<PanelContext | undefined>(undefined)
 const PanelState = createContext<PanelData | undefined>(undefined)
@@ -80,6 +85,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
+  const [activeProjectId, setProject] = useState(() => globalThis.sessionStorage?.getItem('dsh-superagent/project') || 'all')
+  const selectProject = useCallback((id: string) => { globalThis.sessionStorage?.setItem('dsh-superagent/project', id); setProject(id) }, [])
   const [token, setToken] = useState<string>()
   const [locked, setLocked] = useState(false)
   const [entry, setEntry] = useState('')
@@ -104,10 +111,12 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     const timer = setTimeout(() => setRestarting(undefined), 30_000)
     return () => clearTimeout(timer)
   }, [restarting])
-  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart }), [t, call, navigate, back, backLabel,
-    openSession, notify, restart])
-  const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts }), [state, error,
-    reload, restarts])
+  const { data: projects, reload: reloadProjects } = usePoll(() => call('GET projects'), [call], interval)
+  const scope = projects && !projects.items.some(project => project.id === activeProjectId && !project.archived) ? 'all' : activeProjectId
+  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart, activeProjectId: scope, selectProject }),
+    [t, call, navigate, back, backLabel, openSession, notify, restart, scope, selectProject])
+  const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts, ...(projects ? { projects } : {}), reloadProjects }), [state, error,
+    reload, restarts, projects, reloadProjects])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>
     <style>{STYLES}</style>
     {locked && <form className="dt-form dt-block" onSubmit={event => {

@@ -74,7 +74,7 @@ export const threadFollowedNotice = (ticketId: string, thread: string, reason: s
     `Ticket ${ticketId} follows thread ${thread} for context: ${reason}`)
 
 /** Steering relay payload for the main Session: `id` is the request ID that makes delivery idempotent, and `text` is the message body. */
-export interface Relay { id: string; text: string }
+export interface Relay { id: string; text: string; projectId?: string }
 /** What a follow-up asks of the main Session: nothing but a stop the person asks for, since its ticket's worker decides it. */
 const FOLLOWUP_NOTE = 'Its ticket\'s worker has it and decides; act only if the person asks to stop the work '
   + '(orchestrator_route kind stop with this trigger_id).'
@@ -110,7 +110,7 @@ export function resultRelay(ticket: Ticket, state: string, text: string, replyTo
   const summary = text.length > 600 ? { summary: text.slice(0, 600), chars: text.length } : { summary: text }
   const report = { kind: 'worker_report', ticket: brief(ticket), trigger_id: ticket.origin.triggerId, state, ...replyTo ? { answer_to: replyTo } : {},
     ...summary, read: `ticket/${ticket.id}/result` }
-  return { id: `report:${id}`, text: JSON.stringify(report) }
+  return { id: `report:${id}`, text: JSON.stringify(report), ...(ticket.projectId ? { projectId: ticket.projectId } : {}) }
 }
 /**
  * Converts a worker report recorded on `ticket` into a main-Session relay: a question for a person produces a

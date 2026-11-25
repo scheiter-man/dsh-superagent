@@ -133,6 +133,7 @@ export function TicketPage({ id }: { id: string }) {
         onConfirm={() => after(call('POST tickets/:id/retry', { id }))} />}
       {data.sessionId && <SessionButton variant="outline" sessionId={data.sessionId} />}
     </PageHead>
+    <div className="dt-toolbar">{data.projectName && <Tag tone="info">{data.projectName}</Tag>}{data.desk && <Tag>{data.desk}</Tag>}</div>
     {error && <LoadState error={error} loading={false} />}
     <div className="dt-row-meta dt-status-line">
       <StageMark state={status.dot} icon={status.icon} label={status.label} />

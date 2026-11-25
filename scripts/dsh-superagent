@@ -402,6 +402,7 @@ def start(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'pause', 'resume', 'submit', 'backup', 'init-token'])
+    parser.add_argument('--project', help='Registered Superagent project ID (defaults to the current Git repository).')
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
     parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or None,
@@ -450,7 +451,7 @@ def main():
         if len(text) > 60_000:
             raise RuntimeError('The request body exceeds 60,000 characters.')
         return manage(args, 'local/submit', {'request_id': args.request_id, 'desk': args.desk,
-                      'title': args.title, 'workspace_name': args.workspace_name, 'text': text})
+                      'title': args.title, 'workspace_name': args.workspace_name, 'text': text, **({'project_id': args.project} if args.project else {'cwd': os.getcwd()})})
     with (control(args.profile) / 'operation.lock').open('a') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -1,3 +1,4 @@
+import { Projects } from './projects.ts'
 /** Application composition root and lifecycle manager for dsh-superagent. */
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -64,6 +65,8 @@ export class Runtime extends Service implements SourceHost {
   readonly store: Store
   readonly setup: Setup
   readonly prompts: Prompts
+  readonly projects: Projects
+  readonly promptsOf: (id: string) => Prompts
   readonly effects: Effects
   readonly sources: SourceRegistry
   readonly commands: Commands
@@ -108,11 +111,14 @@ export class Runtime extends Service implements SourceHost {
     try {
       const report = (error: unknown) => { ctx.logger.warn('dsh-superagent: %s', String(error)) }
       const store = opened = this.store = new Store(join(machine.stateDir, 'orchestrator.sqlite'), report)
+      const projects = this.projects = new Projects(store, machine.stateDir)
       const setup = this.setup = new Setup({ context: ctx, machine, lifetime: this.lifetime, restart })
       const deployed = () => setup.configured()
         ? environmentOf({ deployment: setup.deployment, sources: this.sources, settings: store.settings() }) : undefined
       const feishu = () => setup.configured() && !!setup.deployment.feishu
       const prompts = this.prompts = new Prompts(store, () => machine.promptMaxChars.get(), deployed, feishu)
+      const promptsOf = (id: string) => id === projects.legacyId ? prompts : new Prompts(store, () => machine.promptMaxChars.get(), () => undefined, () => false, id)
+      this.promptsOf = promptsOf
       const masterId = store.get(KV.runtime.masterId) ?? `orchestrator-${key(machine.stateDir)}`
       store.set(KV.runtime.masterId, masterId)
       const commands = this.commands = new Commands(() => setup.deployment, () => setup.commandEnvironment, this.lifetime)
@@ -124,25 +130,29 @@ export class Runtime extends Service implements SourceHost {
           .catch(() => { /* sync() records its failure in health. */ })
         return () => {}
       })
-      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, lifetime: this.lifetime }
+      const links: LinkHost = { store, links: this.sourceLinks, commands, sources, projects, lifetime: this.lifetime }
       const link = (trigger: Trigger, signal?: AbortSignal) => sourceLink(links, trigger, signal)
       const environment = (ticket: Ticket) => this.ticketEnvironment(ticket)
       const resources: ResourceHost = { store, pages: new TextCache(4_000_000), prompts, commands, get masterId() { return runtime.masterId }, context: ctx,
         promptVersion: id => this.sessions.promptVersion(id), mayRead: (id, revision) => this.sessions.mayRead(id, revision),
         feishuPageSize: () => feishuSettings(sources).readPageSize, sourceLink: link }
-      const sessions = this.sessions = new Sessions({ context: ctx, store, prompts, effects, health: board.claim('models'), masterId,
+      const sessions: Sessions = this.sessions = new Sessions({ context: ctx, store, prompts, projects, promptsOf, effects, health: board.claim('models'), masterId,
         masterCwd: machine.stateDir, lifetime: this.lifetime, paused: () => this.paused(), startupHeld: () => this.startupHold,
         closing: () => this.closing(), environment,
-        tools: (agent, ticket) => ticket ? executorTools(this.toolHost, ticket) : mainTools(this.toolHost, agent) })
+        tools: (agent, ticket) => {
+          const owner = () => ticket ? projects.scope(this.store.tickets.get(ticket.id) ?? ticket) : sessions.routerProject(agent.id) ?? projects.legacyId
+          const scoped = { ...this.toolHost, sessions: { status: () => sessions.status(owner()), notify: (name: string, value: Record<string, unknown>, summary: string) => sessions.notify(name, value, summary, owner()), delivery: (name: string) => sessions.delivery(name, owner()), modelRetry: (sessionId?: string) => sessions.modelRetry(sessionId), relay: (requestId: string, text: string) => sessions.relay(requestId, text, owner()) }, resources: { ...resources, get masterId() { return sessions.masterIdOf(owner()) }, get prompts() { return promptsOf(owner()) }, project: { get id() { return owner() }, registry: projects } } }
+          return ticket ? executorTools(scoped, ticket) : mainTools(scoped, agent)
+        } })
       const policyChanged: EngineForSettings['policyChanged'] = (from, to, effects) => { this.engine.policyChanged(from, to, effects) }
       this.settings = new Settings({ store, sources, engine: { policyChanged }, health: board, context: ctx, lifetime: this.lifetime, sessions,
         sourceHost: this, setup, requestPass: () => { this.passes.request() } })
-      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine,
+      this.executor = new DshExecutor({ context: ctx, get engine() { return runtime.engine }, store, effects, health: board.claim('worker'), machine, projects,
         lifetime: this.lifetime, sessions, closing: () => this.closing(), paused: () => this.paused(), childEnvironment: () => setup.workerEnvironment, environment, sourceLink: link,
         repliedTo: trigger => repliedTo({ store, sources }, trigger) })
       this.assessor = new MasterAssessor({ get engine() { return runtime.engine }, commands, get deployment() { return setup.deployment }, effects,
         settings: () => store.settings(), paused: () => this.paused(), threadContext: trigger => sources.threadContext(trigger),
-        deliver: (id, text) => sessions.promptMaster(id, text, 'steer'), candidateCard: candidate => candidateCard(links, candidate) })
+        deliver: (id, text, projectId) => sessions.promptMaster(id, text, 'steer', projectId), candidateCard: candidate => candidateCard(links, candidate) })
       const outbox = this.outbox = new Outbox({ store, effects, sources, commands, paused: () => this.paused() })
       const { assessor, executor } = this
       const policy = () => settingsPolicy(store.settings(), sources, this.startupHold)
@@ -150,16 +160,20 @@ export class Runtime extends Service implements SourceHost {
         outbox, prepareTicket: (ticket, outcome) => executor.prepare(ticket, outcome), emit: event => {
           // Notify the main Session only about domain events it did not initiate itself.
           const notice = this.quiet ? undefined : eventNotice(event, id => store.tickets.get(id))
-          if (notice) sessions.notify(...notice)
+          if (notice) {
+            const data = event.data as { ticketId?: string; triggerId?: string }
+            const owner = data.ticketId ? store.tickets.get(data.ticketId) : data.triggerId ? store.triggers.get(data.triggerId) : undefined
+            sessions.notify(...notice, projects.scope(owner))
+          }
           // A person's message that reached an open ticket is the ticket's; the main Session hears of it in the same transaction,
           // and of one for an ended ticket once it resumes, unless it routed the message there itself.
           const followed = !this.quiet && (event.type === 'trigger.received' || event.type === 'ticket.resumed' || event.type === 'trigger.followup')
           const followup = followed ? followupNotice(store, sources, event.data.triggerId) : undefined
-          if (followup) sessions.relay(followup.id, followup.text)
+          if (followup && followed) sessions.relay(followup.id, followup.text, store.triggers.get(event.data.triggerId)?.projectId)
           // Notify the ticket's conversations whenever it ends via a pull request.
           const ended = event.type === 'ticket.ended' ? store.tickets.get(event.data.ticketId) : undefined
           const repository = setup.configured() ? setup.deployment.repository : undefined
-          if (ended && repository) {
+          if (ended && projects.scope(ended) === projects.legacyId && repository) {
             const request = store.triggers.get(ended.origin.triggerId)?.text ?? ''
             for (const message of pullEndNotices(ended, request, repository)) outbox.send(message)
           }
@@ -201,7 +215,9 @@ export class Runtime extends Service implements SourceHost {
   ticketEnvironment(ticket: Ticket): Variable[] {
     const trigger = sourceTrigger(this, ticket)
     const { setup: { deployment }, sources } = this
-    return ticketEnvironment({ deployment, sources, settings: this.store.settings(), ticket, ...trigger ? { trigger } : {} })
+    const settings = this.store.settings()
+    if (this.projects.scope(ticket) !== this.projects.legacyId) for (const id of Object.keys(settings.sources)) if (id !== 'local') settings.sources[id]!.enabled = false
+    return ticketEnvironment({ deployment, sources, settings, ticket, ...trigger ? { trigger } : {} })
   }
   checkSetup(): void { this.setup.check() }
   receive(trigger: Trigger): ReceiveResult { return this.passes.receive(trigger) }
@@ -222,13 +238,14 @@ export class Runtime extends Service implements SourceHost {
   }
   private async recoverableCount(): Promise<number> {
     const open = this.store.tickets.open()
+    const routerIds = new Set(this.sessions.masterIds())
     const working = new Set(open.filter(ticket => ticketStage(ticket).stage === 'working'
       || (!ticket.attention && ticket.undelivered.length > 0 && !waitsForPerson(ticket))).map(ticket => ticket.id))
     const threads = this.store.threads.active().filter(thread => thread.evaluating || thread.pending.length)
     // DSH reconstructs the inbox from its journal. Inspect it without activating the agent.
     const controller = this.ctx.sessionController
     if (typeof controller.projections === 'function') {
-      const ids = [this.masterId, ...open.filter(ticket => ticket.assignments.some(item => item.startedAt))
+      const ids = [...routerIds, ...open.filter(ticket => ticket.assignments.some(item => item.startedAt))
         .map(ticket => workerSessionId(ticket.id))] as SessionId[]
       for (const sessionId of ids) {
         if (this.closing()) break
@@ -245,7 +262,7 @@ export class Runtime extends Service implements SourceHost {
         }
       }
     }
-    const inboxes = [...this.heldInboxes].filter(id => id === this.masterId || !working.has(id.slice('worker-'.length)))
+    const inboxes = [...this.heldInboxes].filter(id => routerIds.has(id) || !working.has(id.slice('worker-'.length)))
     return working.size + threads.length + inboxes.length || Number(this.effects.pending('relay') || this.effects.pending('reply'))
   }
   private resumeProcessing(): Promise<{ paused: boolean; startupHold: boolean }> {
@@ -256,6 +273,10 @@ export class Runtime extends Service implements SourceHost {
     const result = await this.settings.pause(false, 'panel')
     if (this.setup.configured() && !this.closing()) {
       await this.sessions.ensureMaster()
+      for (const id of this.heldInboxes) {
+        const project = this.sessions.routerProject(id)
+        if (project && project !== this.projects.legacyId) await this.sessions.ensureMaster(project)
+      }
       await this.restoreInboxes()
     }
     this.startupHoldCount = 0
@@ -290,7 +311,13 @@ export class Runtime extends Service implements SourceHost {
       for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
       if (this.closing()) return
       this.executor.resume()
-      if (!this.paused()) await this.restoreInboxes()
+      if (!this.paused()) {
+        for (const id of this.heldInboxes) {
+          const project = this.sessions.routerProject(id)
+          if (project && project !== this.projects.legacyId) await this.sessions.ensureMaster(project)
+        }
+        await this.restoreInboxes()
+      }
       if (this.closing()) return
       this.passes.start()
       this.effects.start()
@@ -301,12 +328,14 @@ export class Runtime extends Service implements SourceHost {
   }
   private httpHost(): HttpHost {
     const runtime = this
-    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks, setup, passes } = this
-    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks,
+    const { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks, setup, passes, projects, promptsOf } = this
+    return { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks, projects, promptsOf,
+      masterIdOf: id => sessions.masterIdOf(id), openMaster: async id => (await sessions.ensureMaster(id)).id,
+      workspaces: () => this.ctx.workspaceRegistry.list?.().map(({ id, title, path }) => ({ id, title, path })) ?? [],
       instanceId: this.instanceId, get ready() { return runtime.ready }, get masterId() { return runtime.masterId },
       get startupHold() { return runtime.startupHold }, get startupHoldCount() { return runtime.startupHoldCount },
       resumeProcessing: () => this.resumeProcessing(), closing: () => this.closing(),
-      submitLocal: (submission: LocalSubmission) => submitLocal(store, engine, submission),
+      submitLocal: (submission: LocalSubmission) => submitLocal(store, engine, submission, projects),
       get deployment() { return setup.deployment },
       get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem },
       configured: () => setup.configured(), links: () => runtime.links(), ticketEnvironment: ticket => runtime.ticketEnvironment(ticket),
@@ -320,7 +349,7 @@ export class Runtime extends Service implements SourceHost {
     this.stopped.abort()
     try {
       this.assessor.stop()
-      const ids = [this.masterId, ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
+      const ids = [...this.sessions.masterIds(), ...this.store.tickets.list().map(ticket => workerSessionId(ticket.id))]
       const agents = ids.map(id => this.ctx.agents.get(id as SessionId)).filter((agent): agent is Agent => agent !== undefined)
       for (const agent of agents) agent.cancel({ kind: 'user' }, { keepInbox: true })
       await Promise.allSettled([this.ready, requests, passes, this.effects.drain(), ...agents.map(agent => agent.whenIdle())])

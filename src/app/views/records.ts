@@ -1,3 +1,4 @@
+import type { Projects } from '../projects.ts'
 /** Shared view projections for triggers, tickets, threads, decisions, and channel links. */
 import { z } from 'zod'
 import { canRetry, followupOwners, latestReport, liveTicket, settled, threadKey, ticketStage, type ActorRef, type ChannelRef, type Decision,
@@ -10,7 +11,15 @@ import type { Store } from '../store.ts'
 import { attribute, markdown, plain, preview, readable } from './text.ts'
 
 export type LinkTarget = (channel: ChannelRef) => ChannelLink
-export interface ViewHost { store: Store; sources: SourceRegistry; links: LinkTarget }
+export interface ViewHost {
+  projects?: Projects
+  project?: { id: string; legacy: string }
+  store: Store; sources: SourceRegistry; links: LinkTarget }
+export const inProject = (host: ViewHost, row?: Pick<Ticket | Trigger, 'projectId'>) => !host.project || (row?.projectId ?? host.project.legacy) === host.project.id
+export function projectFields(host: ViewHost, row?: Pick<Ticket | Trigger, 'projectId'>) {
+  const projectId = host.projects?.scope(row)
+  return { ...(projectId ? { projectId, projectName: host.projects!.get(projectId).name } : {}) }
+}
 export const page = <T>(items: T[], offset: number, limit: number) => ({ items: items.slice(offset, offset + limit), total: items.length, next_offset: offset + limit < items.length ? offset + limit : null })
 const DAY = 86_400_000
 export const dayAgo = () => new Date(Date.now() - DAY).toISOString()
@@ -116,7 +125,7 @@ function ticketNote(ticket: Ticket, stage: TicketStage): { text: string; error: 
   return { text: preview(summary.split('\n')[0]!), error: stage.action === 'failed' }
 }
 export function ticketSummary(ticket: Ticket): { desk?: string } & ReturnType<typeof ticketSummaryFields> {
-  const desk = ticket.mandate.basis.source === 'local' ? attribute(ticket.mandate.basis.scope?.desk) : undefined
+  const desk = ticket.desk ?? (ticket.mandate.basis.source === 'local' ? attribute(ticket.mandate.basis.scope?.desk) : undefined)
   return { ...ticketSummaryFields(ticket), ...(desk ? { desk } : {}) }
 }
 function ticketSummaryFields(ticket: Ticket) {
@@ -142,7 +151,7 @@ export function threadFacts(store: Store, thread: Thread) {
   return { key: thread.key, source: thread.ref.source, title: threadTitle(store, thread), ...url ? { url } : {}, facts: (thread.meta.facts ?? {}) as ThreadFacts }
 }
 export type ThreadFactsView = ReturnType<typeof threadFacts>
-export const ticketLine = (view: Snapshot, ticket: Ticket) => ({ ...ticketSummary(ticket),
+export const ticketLine = (view: Snapshot, ticket: Ticket) => ({ ...ticketSummary(ticket), ...projectFields(view, ticket),
   threads: view.threadsOf(ticket.id).map(thread => threadFacts(view.store, thread)) })
 export function threadTitle(store: Pick<Store, 'read'>, thread: Thread): string {
   const label = attribute(thread.meta.label)
@@ -204,7 +213,9 @@ export function decisionView(view: Snapshot, decision: Decision) {
   const audit = AuditSchema.parse(decision.audit ?? {})
   // Fall back to `matches` for assessments recorded by older versions.
   const judged = audit.rule_assessments ?? audit.matches?.map(match => ({ ...match, matched: true })) ?? []
-  return { id: decision.id, kind: decision.kind, outcome: outcomeOf(decision), reason: decision.reason, at: decision.at,
+  const trigger = store.triggers.get(decision.triggerIds[0] ?? '')
+  const desk = trigger?.desk ?? attribute(trigger?.meta.desk)
+  return { ...projectFields(view, trigger), ...(desk ? { desk } : {}), id: decision.id, kind: decision.kind, outcome: outcomeOf(decision), reason: decision.reason, at: decision.at,
     strength: decision.strength, ticketId: decision.ticketId, triggerIds: decision.triggerIds, thread: decision.threadKey,
     rules: judged.map(rule => ({ ...view.rule(rule.rule_id), matched: rule.matched, reason: rule.reason })),
     ...audit.direction ? { direction: audit.direction } : {},

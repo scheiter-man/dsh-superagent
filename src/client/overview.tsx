@@ -61,9 +61,9 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
 }
 
 export function OverviewPage() {
-  const { t, call, navigate } = usePanel()
+  const { t, call, navigate, activeProjectId } = usePanel()
   const { setup, state, reload: reloadState } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET overview'), [call])
+  const { data, error, reload } = usePoll(() => call('GET overview', activeProjectId === 'all' ? undefined : { query: { project: activeProjectId } }), [call, activeProjectId])
   const refresh = async () => { await Promise.all([reload(), reloadState()]) }
   if (!data) return <LoadState error={error} loading />
   const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
@@ -102,7 +102,7 @@ export function OverviewPage() {
     <Section title={t('term.executor')} action={more({ page: 'execution' })}>
       {/* Pauses surface in `problems` above, so Executor counts render the same in both states; while setup waits, nothing runs. */}
       {setup?.problem ? <Hint>{t('executorWaitingSetup')}</Hint> : <div className="dt-stats">
-        {stat(t('executingLabel'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
+        {stat(t('globalRunning'), `${data.executor.running} / ${data.executor.maxWorkers}`)}
         {stat(t('queuedLabel'), data.executor.queued)}
         {stat(t('idleLabel'), data.executor.idle)}
       </div>}
@@ -119,7 +119,11 @@ function workspaceName(title: string): string {
 }
 
 function NewLocalTicket({ refresh }: { refresh: () => Promise<void> }) {
-  const { call, notify, t, navigate } = usePanel()
+  const { call, notify, t, navigate, activeProjectId } = usePanel()
+  const { projects } = usePanelData()
+  const available = projects?.items.filter(project => !project.archived) ?? []
+  const [projectId, setProjectId] = useState('')
+  const choose = (id: string) => { setProjectId(id); setDesk(available.find(item => item.id === id)?.desks[0] ?? 'mentor') }
   const [open, setOpen] = useState(false)
   const [desk, setDesk] = useState('mentor')
   const [custom, setCustom] = useState('')
@@ -129,23 +133,28 @@ function NewLocalTicket({ refresh }: { refresh: () => Promise<void> }) {
   const [ticket, setTicket] = useState<string>()
   const pending = useRef<{ payload: string; id: string } | undefined>(undefined)
   const action = useAction(async () => {
-    const value: Omit<LocalSubmission, 'request_id'> = { desk: desk === 'custom' ? custom.trim() : desk,
+    const value: Omit<LocalSubmission, 'request_id'> = { ...(projectId ? { project_id: projectId } : {}), desk: desk === 'custom' ? custom.trim() : desk,
       title: title.trim(), text, workspace_name: workspace.trim() || workspaceName(title) }
     const payload = JSON.stringify(value)
     if (pending.current?.payload !== payload) pending.current = { payload, id: globalThis.crypto.randomUUID() }
     const receipt = await call('POST local/submit', { body: { ...value, request_id: pending.current.id } })
     pending.current = undefined
+    if (projectId) globalThis.localStorage?.setItem('dsh-superagent/last-ticket-project', projectId)
     setTicket(receipt.ticket_id); setOpen(false); setTitle(''); setText(''); setWorkspace('')
     notify(t('newTicketSuccess'))
     await refresh()
   })
   return <Section title={t('newTicket')} action={<Button type="button" size="sm" variant="outline" aria-expanded={open}
-    onClick={() => setOpen(!open)}>{open ? t('close') : `+ ${t('newTicket')}`}</Button>}>
+    onClick={() => {
+      if (!open) { const preferred = activeProjectId !== 'all' ? activeProjectId : globalThis.localStorage?.getItem('dsh-superagent/last-ticket-project'); choose(available.some(row => row.id === preferred) ? preferred! : projects?.defaultId ?? '') }
+      setOpen(!open)
+    }}>{open ? t('close') : `+ ${t('newTicket')}`}</Button>}>
     {ticket && <button type="button" className="dt-textlink" onClick={() => navigate({ page: 'execution', id: ticket })}>
       {t('newTicketOpen')}</button>}
     {open && <form className="dt-form" onSubmit={event => { event.preventDefault(); void action.run() }}>
+      {available.length > 0 && <Field label={t('projectLabel')}><select className="dt-select" value={projectId} onChange={event => choose(event.target.value)}>{available.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></Field>}
       <Field label={t('ticketDesk')}><select className="dt-select" value={desk} onChange={event => setDesk(event.target.value)}>
-        {DESKS.map(value => <option value={value} key={value}>{value}</option>)}
+        {(available.find(item => item.id === projectId)?.desks ?? DESKS).map(value => <option value={value} key={value}>{value}</option>)}
         <option value="custom">{t('ticketCustomDesk')}</option>
       </select></Field>
       {desk === 'custom' && <Field label={t('ticketCustomDesk')}><Input value={custom} required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}"

@@ -89,6 +89,7 @@ export interface PanelServer {
   joinError?: string
   settings: Settings; revisions: Record<string, number>
   prompts: PromptsView
+  projects?: ApiResponse<'GET projects'>
   tickets: { open: TicketRow[]; ended: TicketRow[] }; ticketDetails: Record<string, TicketPageView>
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
@@ -294,11 +295,14 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'GET projects': { answer: () => server.projects ?? { defaultId: '', items: [], workspaces: [] } },
+  'PUT projects/:id': { body: true, answer: ({ body }) => ({ ...body.project, revision: 1 }) },
+  'POST projects/:id/router': { answer: ({ params }) => ({ masterId: server.projects?.items.find(item => item.id === params.id)?.masterId ?? 'master' }) },
   'GET health': { answer: () => ({ ok: true, instanceId: 'instance', pid: 1, paused: server.settings.paused, startupHold: false }) },
   'POST resume': { answer: () => { server.settings.paused = false; server.startupHoldCount = 0; return { paused: false, startupHold: false } } },
   'POST local/submit': { body: true, answer: ({ body }) => ({ request_id: body.request_id, desk: body.desk, ticket_id: 'local-test', trigger_id: 'local-trigger', duplicate: false }) },
-  'GET overview': { answer: overviewView },
-  'GET search': { query: ['q'], answer: async ({ query }) => {
+  'GET overview': { query: ['project'], answer: overviewView },
+  'GET search': { query: ['q', 'project'], answer: async ({ query }) => {
     const q = query.q ?? ''
     await server.searching?.(q)
     return { tickets: [], threads: server.search.threads, items: server.search.items.filter(item => item.preview.includes(q)) }
@@ -325,11 +329,11 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     return { removed, thread: params.key, context_delivery: 'injected' }
   } },
   'POST triggers/:id/requeue': { answer: ({ params }) => { server.queued.add(params.id); return { queued: true } } },
-  'GET decisions': { query: ['kind', 'window', 'offset', 'limit'], answer: ({ query }) =>
+  'GET decisions': { query: ['kind', 'window', 'offset', 'limit', 'project'], answer: ({ query }) =>
     ({ items: query.kind === 'ignore' ? [] : [acceptDecision()], next_offset: null }) },
   'POST decisions/:id/dismiss': { answer: ({ params }) => params.id === 'u1' ? { dismissed: true } : refuse(404,
     'Unavailable Eval not found') },
-  'GET tickets': { query: ['state', 'offset', 'limit'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
+  'GET tickets': { query: ['state', 'offset', 'limit', 'project'], answer: ({ query }) => page(server.tickets[query.state === 'ended' ? 'ended'
     : 'open']) },
   'GET tickets/:id': { answer: ({ params }) => server.ticketDetails[params.id] ?? refuse(404, 'Ticket not found') },
   'POST tickets/:id/retry': { answer: ({ params }) => {
@@ -377,8 +381,8 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET models': { answer: () => ({ default: { provider: 'host', model: 'default' }, routableProviders: [], failures: [],
     groups: [{ id: 'worker-provider', name: 'Worker provider', models: [{ id: 'worker-model', name: 'Worker model',
       reasoning: { efforts: [{ id: 'high', name: 'High' }] } }] }] }) },
-  'GET prompts': { query: ['revision', 'offset'], answer: () => server.prompts },
-  'PUT prompts': { body: true, answer: ({ body }) => {
+  'GET prompts': { query: ['revision', 'offset', 'project'], answer: () => server.prompts },
+  'PUT prompts': { query: ['project'], body: true, answer: ({ body }) => {
     const { revision } = server.prompts
     if (body.baseRevision !== revision) return refuse(409,
       `Prompt version changed to ${revision}; compare the latest version before saving`)
@@ -393,7 +397,7 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.prompts.current = promptVersion(server.prompts.revision, Object.keys(overrides).length ? { ...config, overrides } : config)
     return { revision: server.prompts.revision, context_delivery: 'injected' }
   } },
-  'POST prompts/preview': { body: true, answer: ({ body }) => {
+  'POST prompts/preview': { query: ['project'], body: true, answer: ({ body }) => {
     const skills = [...server.setup.accounts?.feishu ? ['feishu'] : [], 'github', ...Object.keys(body.skills)].map(name => [name,
       composeSkill(body, name)])
     // The generated parts from their templates, without variables or rules.

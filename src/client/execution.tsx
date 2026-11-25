@@ -14,9 +14,9 @@ import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, Section, StatusHe
 export function ExecutionStatus({ filter: current, state, reload }: {
   filter: TicketFilter; state: StateView; reload: () => Promise<void>
 }) {
-  const { t, call, navigate } = usePanel()
+  const { t, call, navigate, activeProjectId } = usePanel()
   const [limit, setLimit] = useState(20)
-  const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit } }), [current, limit])
+  const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit, ...(activeProjectId !== 'all' ? { project: activeProjectId } : {}) } }), [call, current, limit, activeProjectId])
   const { paused: manualPaused, startupHold, load: { maxWorkers } } = state
   const paused = manualPaused || startupHold
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
@@ -30,7 +30,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
     <div className="dt-row-meta dt-status-line">
       <span className="dt-status-text" data-state={status.tone}>{status.label}</span>
       {!state.setup.problem && <>
-        <LabelValue label={t('executingLabel')}
+        <LabelValue label={t('globalRunning')}
           value={`${state.load.running} / ${maxWorkers}`} /><LabelValue label={t('queuedLabel')} value={state.load.queued} />
       </>}
       <ConfirmButton variant="outline" icon={paused ? 'play' : 'pause'} label={t(action)} title={t(action)} message={t(paused

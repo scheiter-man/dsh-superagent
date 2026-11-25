@@ -1,3 +1,4 @@
+import type { ProjectInput, Project } from './projects.ts'
 import type { LocalSubmission, submitLocal } from './local-intake.ts'
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
 import type { ModelCatalog } from '@deepseek-ai/dsh-api-session-controller/types'
@@ -23,8 +24,11 @@ export interface Api {
   'POST resume': { response: { paused: boolean; startupHold: boolean } }
   'GET state': { response: StateView }
   'POST local/submit': { body: LocalSubmission; response: ReturnType<typeof submitLocal> }
-  'GET overview': { response: OverviewView }
-  'GET search': { query: { q: string }; response: SearchView }
+  'GET projects': { response: { defaultId: string; items: (Project & { masterId: string; active: number })[]; workspaces: { id: string; title: string; path: string }[] } }
+  'PUT projects/:id': { body: { project: ProjectInput; revision: number; makeDefault?: boolean; adoptLegacy?: boolean }; response: Project }
+  'POST projects/:id/router': { response: { masterId: string } }
+  'GET overview': { query?: { project?: string }; response: OverviewView }
+  'GET search': { query: { q: string; project?: string }; response: SearchView }
   'GET sources': { response: SourceStatusView[] }
   'GET settings': { response: SettingsView }
   'POST sources/:id/labels': { response: { added: string[] } }
@@ -32,9 +36,9 @@ export interface Api {
   'GET threads/:key': { query?: { limit?: number; before?: string; around?: string }; response: ThreadDetailView }
   'POST threads/:key/unsubscribe': { response: { removed: boolean; thread: string; context_delivery: Delivery } }
   'POST triggers/:id/requeue': { response: { queued: boolean } }
-  'GET decisions': { query?: Paged & { kind?: string; window?: '24h' }; response: DecisionListView }
+  'GET decisions': { query?: Paged & { kind?: string; window?: '24h'; project?: string }; response: DecisionListView }
   'POST decisions/:id/dismiss': { response: { dismissed: true } }
-  'GET tickets': { query?: Paged & { state?: TicketFilter }; response: TicketListView }
+  'GET tickets': { query?: Paged & { state?: TicketFilter; project?: string }; response: TicketListView }
   'GET tickets/:id': { response: TicketPageView }
   'POST tickets/:id/retry': { response: { retried: true } }
   'POST tickets/:id/stop': { response: { stopped: true } }
@@ -44,9 +48,9 @@ export interface Api {
   'POST policy-sync/:id': { response: { policy: unknown } }
   'POST setup/check': { response: { restarting: true } }
   'GET models': { response: ModelCatalog }
-  'GET prompts': { query?: { revision?: number; offset?: number }; response: PromptsView }
-  'PUT prompts': { body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
-  'POST prompts/preview': { body: PromptConfig; response: ReturnType<Prompts['preview']> }
+  'GET prompts': { query?: { revision?: number; offset?: number; project?: string }; response: PromptsView }
+  'PUT prompts': { query?: { project?: string }; body: { config: PromptConfig; baseRevision: number }; response: { revision: number; context_delivery: Delivery } }
+  'POST prompts/preview': { query?: { project?: string }; body: PromptConfig; response: ReturnType<Prompts['preview']> }
 }
 type Path<K> = K extends `${string} ${infer P}` ? P : never
 type Params<P> = P extends `${string}:${infer Name}/${infer Rest}` ? Record<Name, string> & Params<Rest>

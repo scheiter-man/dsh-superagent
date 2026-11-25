@@ -1,3 +1,4 @@
+import { ProjectError, ProjectInput, Projects } from './projects.ts'
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -32,6 +33,11 @@ import { executorLoad, ticketDetail, ticketList } from './views/tickets.ts'
 
 export interface HttpHost {
   readonly store: Store
+  readonly projects?: Projects
+  promptsOf?(id: string): HttpHost['prompts']
+  masterIdOf?(id: string): string
+  openMaster?(id: string): Promise<string>
+  workspaces?(): { id: string; title: string; path: string }[]
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
   readonly sourceLinks: Pick<TextCache, 'entries'>
   readonly sources: SourceRegistry
@@ -97,6 +103,7 @@ function failure(error: unknown): [number, Record<string, unknown>] {
     return [400, { error: `Invalid settings: ${issues.map(issue => issue.path).join(', ')}`, issues }]
   }
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
+  if (error instanceof ProjectError) return [error.status, { error: error.message }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
   if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof LocalSubmissionConflict) return [409, { error: error.message }]
@@ -122,7 +129,12 @@ export function stateView(runtime: HttpHost) {
     masterId: runtime.masterId, instanceId: runtime.instanceId, paused: settings.paused, startupHold: runtime.startupHold,
     startupHoldCount: runtime.startupHoldCount, health: runtime.health }
 }
-const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
+const views = (runtime: HttpHost, id?: string): ViewHost => {
+  const projects = runtime.projects
+  if (projects && id && id !== 'all') projects.get(id)
+  return { store: runtime.store, sources: runtime.sources, links: runtime.links(), ...(projects ? { projects } : {}),
+    ...(projects && id && id !== 'all' ? { project: { id, legacy: projects.legacyId } } : {}) }
+}
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
   problem: runtime.setupProblem, feishuProblem: runtime.feishuProblem })
 export type StateView = ReturnType<typeof stateView>
@@ -164,6 +176,14 @@ const SaveRequest = z.object({ value: z.unknown(), revision: z.number().int().no
 
 function routes(runtime: HttpHost): Routes {
   const { store } = runtime
+  const projects = runtime.projects ?? new Projects(store, runtime.machine.stateDir)
+  const promptScope = (id?: string): HttpHost => {
+    if (!id || id === 'all') return runtime
+    projects.get(id)
+    return { ...runtime, prompts: runtime.promptsOf?.(id) ?? runtime.prompts, masterId: runtime.masterIdOf?.(id) ?? runtime.masterId,
+      sessions: { status: () => runtime.sessions.status(id), notify: (name, value, summary) => runtime.sessions.notify(name, value, summary, id),
+        delivery: name => runtime.sessions.delivery(name, id) } }
+  }
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
@@ -176,9 +196,21 @@ function routes(runtime: HttpHost): Routes {
       runtime.requestPass()
       return receipt
     },
-    'GET overview': () => overview(views(runtime), runtime.health, policyVersion(store.settings()),
+    'GET projects': () => ({ defaultId: projects.defaultId, workspaces: runtime.workspaces?.() ?? [], items: projects.list().map(project => ({ ...project,
+      masterId: runtime.masterIdOf?.(project.id) ?? runtime.masterId, active: store.tickets.open().filter(ticket => projects.scope(ticket) === project.id).length })) }),
+    'PUT projects/:id': async ({ params, body }) => {
+      const { project, revision, makeDefault, adoptLegacy } = z.object({ project: ProjectInput, revision: count, makeDefault: z.boolean().optional(), adoptLegacy: z.boolean().optional() }).parse(await body())
+      if (project.id !== params.id) throw new RouteError(400, 'Project ID does not match the route')
+      return projects.save(project, revision, makeDefault ?? false, adoptLegacy ?? false)
+    },
+    'POST projects/:id/router': async ({ params }) => {
+      if (projects.get(params.id).archived) throw new RouteError(400, 'Project is archived')
+      if (runtime.startupHold || store.settings().paused || !runtime.configured()) throw new RouteError(503, 'Resume processing before opening a Router')
+      return { masterId: await runtime.openMaster?.(params.id) ?? runtime.masterId }
+    },
+    'GET overview': ({ query }) => overview(views(runtime, query.project), runtime.health, policyVersion(store.settings()),
       executorLoad(store, runtime.executor.activeCount()), runtime.setupProblem ?? runtime.feishuProblem),
-    'GET search': ({ query }) => search(views(runtime), query.q ?? '', runtime.sourceLinks),
+    'GET search': ({ query }) => search(views(runtime, query.project), query.q ?? '', runtime.sourceLinks),
     'GET sources': () => sourcesStatus(views(runtime), runtime.health, setupState(runtime)),
     'GET settings': () => settingsView(store, runtime.sources, runtime.health, setupState(runtime), runtime.machine.stateDir),
     'POST sources/:id/labels': ({ params }) => runtime.settings.refreshLabels(params.id),
@@ -204,12 +236,12 @@ function routes(runtime: HttpHost): Routes {
     'GET decisions': ({ query }) => {
       const { kind, window, offset, limit } = DecisionsQuery.parse(query)
       const since = window ? new Date(Date.now() - 86_400_000).toISOString() : ''
-      return decisionList(views(runtime), kind.split(',').filter(Boolean), offset, limit, since)
+      return decisionList(views(runtime, query.project), kind.split(',').filter(Boolean), offset, limit, since)
     },
     'POST decisions/:id/dismiss': ({ params }) => { runtime.engine.dismiss(params.id); return { dismissed: true } },
     'GET tickets': ({ query }) => {
       const { state, offset, limit } = TicketsQuery.parse(query)
-      return ticketList(views(runtime), state, offset, limit)
+      return ticketList(views(runtime, query.project), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
     'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
@@ -226,12 +258,12 @@ function routes(runtime: HttpHost): Routes {
     'POST policy-sync/:id': async ({ params }) => ({ policy: await runtime.settings.sync(params.id) }),
     'POST setup/check': () => { runtime.checkSetup(); return { restarting: true } },
     'GET models': () => runtime.models(),
-    'GET prompts': ({ query }) => { const { revision, offset } = PromptsQuery.parse(query); return promptsView(runtime, revision, offset) },
+    'GET prompts': ({ query }) => { const { revision, offset } = PromptsQuery.parse(query); return promptsView(promptScope(query.project), revision, offset) },
     'PUT prompts': async input => {
       const request = z.object({ config: z.unknown(), baseRevision: z.number().int().nonnegative() }).parse(await promptBody(input))
-      return savePrompts(runtime, request.config, request.baseRevision, 'panel')
+      return savePrompts(promptScope(input.query.project), request.config, request.baseRevision, 'panel')
     },
-    'POST prompts/preview': async input => runtime.prompts.preview(await promptBody(input)),
+    'POST prompts/preview': async input => promptScope(input.query.project).prompts.preview(await promptBody(input)),
   }
 }
 function decoded(segment: string): string {

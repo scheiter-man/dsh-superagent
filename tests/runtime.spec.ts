@@ -1881,3 +1881,27 @@ it('activates a settled worker with a durable inbox in auto mode', async () => {
   expect(next.startupHold).toBe(false)
   expect(controller.resolveAgent).toHaveBeenCalledWith(sessionId)
 })
+
+
+it('opens independent Routers, scopes local tickets and rejects cross-project reads and notes', async () => {
+  const make = (id: string) => ({ id, name: id, repositoryRoot: '', worktreeRoot: '', prepareMode: 'shell', prepare: '', desks: ['dev'], archived: false })
+  expect((await api('PUT', 'projects/alpha', { project: make('alpha'), revision: 0 })).status).toBe(200)
+  expect((await api('PUT', 'projects/beta', { project: make('beta'), revision: 0 })).status).toBe(200)
+  const first = await api('POST', 'projects/alpha/router'), second = await api('POST', 'projects/beta/router')
+  expect(first.status).toBe(200)
+  expect(second.status).toBe(200)
+  const alpha = (first.body as { masterId: string }).masterId, beta = (second.body as { masterId: string }).masterId
+  expect(alpha).not.toBe(beta)
+  const request = { request_id: 'fixture-project-ticket', project_id: 'alpha', desk: 'dev', title: 'Scoped request', text: 'Synthetic input', workspace_name: 'scoped-request' }
+  const receipt = await api('POST', 'local/submit', request)
+  expect(receipt.status).toBe(200)
+  const id = (receipt.body as { ticket_id: string }).ticket_id
+  expect(runtime.store.tickets.get(id)).toMatchObject({ projectId: 'alpha', execution: { plan: { projectId: 'alpha' } } })
+  expect((await api('POST', 'local/submit', { ...request, project_id: 'beta' })).status).toBe(409)
+  expect((await api('GET', 'tickets?project=alpha')).body).toMatchObject({ total: 1 })
+  expect((await api('GET', 'tickets?project=beta')).body).toMatchObject({ total: 0 })
+  expect((await api('GET', 'decisions?project=beta')).body).toMatchObject({ items: [] })
+  expect((await api('GET', 'search?q=Scoped&project=beta')).body).toMatchObject({ tickets: [] })
+  await expect(runTool(beta, 'orchestrator_ticket_note', { ticket_id: id, text: 'Cross project' })).rejects.toThrow('another project')
+  await expect(runTool(beta, 'orchestrator_read', { resource: `ticket/${id}`, offset: 0, limit: 20 })).rejects.toThrow('Unknown')
+})

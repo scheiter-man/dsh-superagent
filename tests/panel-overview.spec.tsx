@@ -18,7 +18,7 @@ it('leads the overview with the pending Tickets, then problems, the last day and
     && [...row.querySelectorAll('.dt-ticket-actions button, .dt-ticket-actions a')].every(action => action.querySelector('svg')))).toBe(true)
   expect(text()).toContain('来源会在每次轮询时自动重试')
   expect(text()).toContain('需要确认按钮颜色')
-  expect(all('.dt-stat').map(stat => stat.textContent)).toEqual(['到达12', '被过滤2', '已评估5', '接单或续做1', '执行中2 / 3', '排队0', '等待新触发1'])
+  expect(all('.dt-stat').map(stat => stat.textContent)).toEqual(['到达12', '被过滤2', '已评估5', '接单或续做1', '全局运行中2 / 3', '排队0', '等待新触发1'])
   expect(all('.dt-chip').map(chip => chip.textContent)[0]).toBe('GitHub#42CI 失败1')
   expect(document.querySelector('.dt-chip-problem')?.textContent).toBe('CI 失败1')
   expect(document.querySelector<HTMLAnchorElement>('a.dt-chip-link')?.href).toBe('https://github.com/acme/widgets/pull/42')
@@ -129,7 +129,7 @@ it('shows the overview in English', async () => {
     `${en.lastDay}${en.details}`, `${en['term.executor']}${en.details}`])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed']])
   expect(all('.dt-stat-label').map(label => label.textContent)).toEqual([en.flowReceivedLabel, en.flowFilteredLabel, en.flowJudgedLabel,
-    en.flowAcceptedLabel, en.executingLabel, en.queuedLabel, en.idleLabel])
+    en.flowAcceptedLabel, en.globalRunning, en.queuedLabel, en.idleLabel])
 })
 
 it('lists the unavailable Evals one by one, without the health entry that counts them as a failure of dsh-superagent', async () => {
@@ -188,4 +188,24 @@ it('shows held startup work and resumes it through the operator action', async (
   await click(zh.confirm)
   expect(server.requests.find(request => request.path === 'resume')).toMatchObject({ method: 'POST' })
   expect(text()).not.toContain(zh.heldTasks.replace('{count}', '3'))
+})
+
+
+it('scopes the panel, opens the selected Router and switches composer desks by project', async () => {
+  const item = (id: string, desk: string) => ({ id, name: id, revision: 1, archived: false, active: 2, repositoryRoot: '', worktreeRoot: '',
+    prepareMode: 'shell' as const, prepare: '', desks: [desk], masterId: `orchestrator-${id}` })
+  server.projects = { defaultId: 'alpha', workspaces: [], items: [item('alpha', 'review'), item('beta', 'develop')] }
+  await mount()
+  await type(document.querySelector<HTMLSelectElement>('.dt-project-switcher')!, 'beta')
+  await click(`${zh.openMaster} · beta`)
+  expect(server.opened).toContain('orchestrator-beta')
+  expect(server.requests.some(request => request.path === 'overview?project=beta')).toBe(true)
+  await click(`+ ${zh.newTicket}`)
+  expect(field<HTMLSelectElement>(zh.ticketDesk).value).toBe('develop')
+  await type(document.querySelector<HTMLSelectElement>('.dt-form select')!, 'alpha')
+  expect(field<HTMLSelectElement>(zh.ticketDesk).value).toBe('review')
+  await type(field<HTMLInputElement>(zh.ticketTitleInput), 'Scoped change')
+  await type(field<HTMLTextAreaElement>(zh.ticketInstructions), 'Verify selected project')
+  await click(zh.newTicketSubmit)
+  expect(server.requests.find(request => request.path === 'local/submit')?.body).toMatchObject({ project_id: 'alpha', desk: 'review' })
 })

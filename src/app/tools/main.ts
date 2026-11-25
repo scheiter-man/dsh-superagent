@@ -7,7 +7,7 @@ import { UserError, followupOwners, reasonText, type Decision, type DecisionKind
 import { IM_WORDS, NOTE_WORDS, wordCount } from '../../infra/text.ts'
 import { AssessmentSchema, EvalReadSchema, WorktreeNameSchema, type MasterAssessor } from '../assessment.ts'
 import { ticketCard } from '../cards.ts'
-import { readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
+import { ownsProject, ownsThread, readResource, type MainResourceHost, type ResourceHost } from '../resources.ts'
 import type { Sessions } from '../sessions.ts'
 import type { Settings } from '../settings.ts'
 import type { Store } from '../store.ts'
@@ -84,6 +84,9 @@ type Routed = { decision?: DecisionKind; reason: string; ticketId?: string | und
  * call's earlier items decided, with their batches.
  */
 function route(host: MainToolsHost, item: RouteItem, decided: ReadonlyMap<string, string>): Routed | { refused: string } {
+  const trigger = host.store.triggers.get(item.trigger_id)
+  const target = item.ticket_id ? host.store.tickets.get(item.ticket_id) : undefined
+  if ((trigger && !ownsProject(host.resources, trigger)) || (target && !ownsProject(host.resources, target))) return { refused: 'Resource belongs to another project' }
   const note = item.note ? { note: item.note } : {}
   // A Trigger an earlier item decided went with that item's Decision, also as a member of its batch.
   // A stop of it for another ticket is the Engine's to judge.
@@ -151,8 +154,9 @@ function routeTool(host: MainToolsHost): Tool {
 }
 /** Builds the main Session's tools; `agent` scopes prompt preview resources to that Session. */
 export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
-  const resources: MainResourceHost = { ...host.resources, sessions: host.sessions, settings: host.settings }
-  return [
+  const resources: MainResourceHost = { ...host.resources, get masterId() { return host.resources.masterId },
+    get prompts() { return host.resources.prompts }, sessions: host.sessions, settings: host.settings }
+  const tools = [
     readTool('Read one page of a resource the resource parameter lists, such as the ticket list or a ticket. Follow next_offset, and next_resource where a page names one.',
       false, (resource, offset, limit, signal) => readResource(resources, resource, offset, limit, undefined, signal)),
     routeTool(host),
@@ -244,4 +248,15 @@ export function mainTools(host: MainToolsHost, agent: Agent): Tool[] {
       },
     }),
   ]
+  return tools.map(tool => {
+    const execute = tool.execute
+    return { ...tool, execute: (args, signal) => {
+      if (resources.project?.registry.get(resources.project.id).archived) throw new Error('Project is archived')
+      const target = args as { ticket_id?: string; trigger_id?: string; thread?: string }
+      if (resources.project && ((target.ticket_id && !ownsProject(resources, host.store.tickets.get(target.ticket_id)))
+        || (target.trigger_id && !ownsProject(resources, host.store.triggers.get(target.trigger_id)))
+        || (target.thread && !ownsThread(resources, target.thread)))) throw new Error('Resource belongs to another project')
+      return execute(args, signal)
+    } }
+  })
 }

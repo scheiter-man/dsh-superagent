@@ -1,3 +1,4 @@
+import type { Projects } from './projects.ts'
 /** Serves paginated context resources to orchestrator_read so large bodies stay out of model prompts until requested. */
 import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
 import { UserError, key, latestReport, reached, runningAssignment, threadKey, type Ticket, type Trigger } from '../core/index.ts'
@@ -56,6 +57,7 @@ export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(r
   .map(resource => `${resource.name}: ${resource.holds}`).join('; ')
 
 export interface ResourceHost {
+  readonly project?: { id: string; registry: Projects }
   readonly store: Pick<Store, 'get' | 'settings' | 'triggers' | 'tickets' | 'threads' | 'read' | 'decisions' | 'replyStatus'>
   readonly pages: TextCache
   readonly prompts: Pick<Prompts, 'current' | 'version' | 'history' | 'skills' | 'defaultChanged'>
@@ -92,9 +94,20 @@ function list<T>({ offset, limit }: Read, fetch: (offset: number, count: number)
 /** Check whether a worker session's ticket is authorized to read a trigger (via delivery, ticket origin, or followed thread). */
 const readable = (host: ResourceHost, ticket: Ticket, trigger: Trigger): boolean => reached(ticket, trigger, key => host.store.threads.get(key))
   || ticket.origin.triggerIds.includes(trigger.id) || trigger.threads.some(ref => ticket.follows?.some(follow => follow.thread === threadKey(ref)))
+export function ownsProject(host: ResourceHost, row: Pick<Ticket | Trigger, 'projectId'> | undefined): boolean {
+  return !!row && (!host.project || host.project.registry.scope(row) === host.project.id)
+}
+function projectFilter(host: ResourceHost) {
+  return host.project ? { id: host.project.id, legacy: host.project.registry.legacyId } : undefined
+}
+export function ownsThread(host: ResourceHost, thread: string): boolean {
+  if (!host.project) return true
+  const first = host.store.read.firstTrigger(thread)
+  return first ? ownsProject(host, first) : host.project.id === host.project.registry.legacyId
+}
 const trigger = (host: ResourceHost, id: string, ticketId?: string): Trigger => {
   const found = host.store.triggers.get(id)
-  if (!found) throw new UserError('unknownTrigger')
+  if (!ownsProject(host, found) || !found) throw new UserError('unknownTrigger')
   const ticket = ticketId ? host.store.tickets.get(ticketId) : undefined
   if (ticketId && (!ticket || !readable(host, ticket, found))) throw new UserError('notReached')
   return found
@@ -125,17 +138,17 @@ async function transcript(host: ResourceHost, ticketId: string): Promise<Session
 
 const ROUTES: readonly Route[] = [
   ['tickets', read => {
-    const host = main(read), tickets = host.store.tickets.list()
+    const host = main(read), tickets = host.store.tickets.list().filter(ticket => ownsProject(host, ticket))
     const card = (ticket: Ticket) => ({ ...ticketCard(ticket), ...host.sessions.modelRetry(runningAssignment(ticket) && workerSessionId(ticket.id)) })
     return list(read, (offset, count) => tickets.slice(offset, offset + count).map(card))
   }],
   ['triggers', read => {
-    const { store } = main(read)
-    return list(read, (offset, count) => store.read.recentTriggers(offset, count).map(item => triggerCard(item, store.triggers.disposition(item.id))))
+    const host = main(read), { store } = host
+    return list(read, (offset, count) => store.read.recentTriggers(offset, count, projectFilter(host)).map(item => triggerCard(item, store.triggers.disposition(item.id))))
   }],
   ['threads', read => {
-    const { store } = main(read)
-    const threads = store.read.subscribedThreads().sort((a, b) => (b.lastAt ?? b.createdAt).localeCompare(a.lastAt ?? a.createdAt))
+    const host = main(read), { store } = host
+    const threads = store.read.subscribedThreads().filter(thread => ownsThread(host, thread.key)).sort((a, b) => (b.lastAt ?? b.createdAt).localeCompare(a.lastAt ?? a.createdAt))
     return list(read, (offset, count) => threads.slice(offset, offset + count).map(thread => threadCard(thread, threadTitle(store, thread))))
   }],
   ['thread/', read => {
@@ -143,7 +156,7 @@ const ROUTES: readonly Route[] = [
     const thread = host.store.threads.get(rest)
     const ticket = ticketId ? host.store.tickets.get(ticketId) : undefined
     // Worker Sessions may only read threads their own ticket subscribes to or follows.
-    if (!thread || (ticketId && !(thread.subscriptions.includes(ticketId) || ticket?.follows?.some(follow => follow.thread === rest)))) {
+    if (!thread || !ownsThread(host, rest) || (ticketId && !(thread.subscriptions.includes(ticketId) || ticket?.follows?.some(follow => follow.thread === rest)))) {
       throw new Error('Unknown or inaccessible thread')
     }
     const { store } = host
@@ -155,10 +168,10 @@ const ROUTES: readonly Route[] = [
     const decisions = store.decisions.byThread(thread.key).slice(-THREAD_DECISIONS).reverse().map(decisionCard)
     return { ...card, tickets, decisions, ...page }
   }],
-  ['decisions', read => list(read, (offset, count) => main(read).store.read.recentDecisions(offset, count).map(decisionCard))],
+  ['decisions', read => list(read, (offset, count) => main(read).store.read.recentDecisions(offset, count, projectFilter(read.host)).map(decisionCard))],
   ['decision/', read => {
     const decision = main(read).store.decisions.get(read.rest)
-    if (!decision) throw new Error('Unknown decision')
+    if (!decision || !ownsThread(read.host, decision.threadKey)) throw new Error('Unknown decision')
     return decisionDetails(decision)
   }],
   ['settings', read => main(read).settings.view()],
@@ -246,7 +259,7 @@ const ROUTES: readonly Route[] = [
     if (!id || more.length) throw new Error('Unknown context resource')
     if (ticketId && ticketId !== id) throw new Error('Ticket does not belong to this worker')
     const ticket = host.store.tickets.get(id)
-    if (!ticket) throw new UserError('unknownTicket')
+    if (!ticket || !ownsProject(host, ticket)) throw new UserError('unknownTicket')
     if (section === undefined) {
       const running = runningAssignment(ticket) && workerSessionId(ticket.id)
       const retry = 'sessions' in host ? (host as MainResourceHost).sessions.modelRetry(running) : {}
@@ -307,6 +320,7 @@ const ROUTES: readonly Route[] = [
 export async function readResource(host: ResourceHost, resource: string, offset: number, limit: number | undefined, ticketId?: string,
   signal?: AbortSignal) {
   const name = resource.replace(/^event\//, 'trigger/').replace(/^task\//, 'ticket/').replace(/^observation\//, 'decision/')
+  if (host.project && host.project.id !== host.project.registry.legacyId && name.startsWith('github/')) throw new Error('GitHub is bound to a different project')
   const route = ROUTES.find(([route]) => route.endsWith('/') ? name.startsWith(route) : name === route)
   if (!route) throw new Error('Unknown context resource')
   const sessionId = ticketId ? workerSessionId(ticketId) : host.masterId

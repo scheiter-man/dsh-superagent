@@ -4,7 +4,7 @@ import type { Health } from '../../sources/host.ts'
 import type { SetupProblem } from '../../setup.ts'
 import { anyoneAllowed } from '../../policy.ts'
 import type { Store } from '../store.ts'
-import { awaitingEval, dayAgo, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
+import { awaitingEval, dayAgo, inProject, newestFirst, ownersOf, snapshot, threadSummary, type ViewHost } from './records.ts'
 import { sourceHealth, type HealthMap } from './sources.ts'
 import { ticketRow, type ExecutorLoad } from './tickets.ts'
 import { preview } from './text.ts'
@@ -40,7 +40,7 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
   const view = snapshot(host)
   const settings = store.settings()
   const now = new Date().toISOString(), since = dayAgo()
-  const evaluating = store.threads.active().filter(thread => thread.evaluating)
+  const evaluating = store.threads.active().filter(thread => thread.evaluating && inProject(host, store.read.firstTrigger(thread.key)))
   const instances = sources.instances()
   const running = instances.filter(instance => instance.enabled && instance.installed).map(instance => sourceHealth(sources, instance, health))
   // Exclude source-owned and policy-sync health entries so only core runtime errors surface as `runtime-error`.
@@ -58,16 +58,16 @@ export function overview(host: ViewHost, health: HealthMap, policyVersionValue: 
       .map(([name, item]) => ({ kind: 'runtime-error' as const, name, detail: item.detail })),
     ...evaluating.filter(thread => thread.evaluating!.deadline < now)
       .map(thread => ({ kind: 'eval-overdue' as const, thread: threadSummary(view, thread) })),
-    ...unjudged(store, since).map(({ thread, decision }) => ({ kind: 'eval-unavailable' as const, decisionId: decision.id,
+    ...unjudged(store, since).filter(({ thread }) => inProject(host, store.read.firstTrigger(thread.key))).map(({ thread, decision }) => ({ kind: 'eval-unavailable' as const, decisionId: decision.id,
       thread: threadSummary(view, thread), reason: decision.reason, triggerId: decision.triggerIds[0] ?? '' })),
     ...store.read.failingReplies().map(item => ({ kind: 'outgoing' as const, outgoing: { id: item.id, channel: item.channel,
       text: preview(item.text),
       attempts: item.attempts, error: item.error } })),
   ]
-  const open = store.tickets.open().sort(newestFirst)
-  const stats = Object.values(store.read.triggerStats(since))
+  const open = store.tickets.open().filter(ticket => inProject(host, ticket)).sort(newestFirst)
+  const stats = Object.values(store.read.triggerStats(since, host.project))
   const received = stats.reduce((sum, item) => sum + item.received, 0), filtered = stats.reduce((sum, item) => sum + item.filtered, 0)
-  const judgement = store.read.flow(since)
+  const judgement = store.read.flow(since, host.project)
   return {
     problems,
     person: open.filter(ticket => ticketStage(ticket).stage === 'person').map(ticket => ticketRow(view, ticket)),

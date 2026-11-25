@@ -1,11 +1,11 @@
 /** Prompts settings group: section/skill editor, full composed prompt preview with diffing, and revision history. */
-import { Fragment, useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { Fragment, createContext, useContext, useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { PromptConfig, PromptsView } from './api.ts'
 import { SaveBar, useDraft, type DraftWords } from './draft.tsx'
 import { changedSections, isPart, isSkill, lineDiff, partKey, partText, partWith, sectionLabel, sectionText, skillNameFree, withOverride,
   withOverrides, withSection, withoutSkill, type BuiltInPart, type DiffLine } from './prompt-config.ts'
-import { useAction, usePanel } from './provider.tsx'
+import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { errorText, valueLabel, when, type T } from './text.ts'
 import { Hint, LoadState } from './widgets.tsx'
 import { Button, Icon, Input, SegmentedControl } from './controls.tsx'
@@ -17,22 +17,36 @@ const originText = (t: T, view: PromptsView, from: Origin | undefined): string |
   : from === 'defaults' ? t('promptDraftFromDefaults') : 'revision' in from ? t('promptDraftFromHistory', { revision: from.revision })
   : t('promptDraftSectionReset', { part: sectionLabel(t, view, from.reset) })
 
+const PromptProject = createContext<string | undefined>(undefined)
 export function PromptsPage() {
+  const { t, activeProjectId } = usePanel()
+  const { projects } = usePanelData()
+  const [chosen, choose] = useState<string>()
+  const project = chosen ?? (activeProjectId === 'all' ? projects?.defaultId : activeProjectId)
+  return <PromptProject.Provider value={project || undefined}>
+    {!!projects?.items.length && <label className="dt-field">{t('projectLabel')}<select className="dt-select" value={project} onChange={event => choose(event.target.value)}>
+      {projects.items.map(item => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>}
+    <ProjectPrompts key={project ?? ''} />
+  </PromptProject.Provider>
+}
+function ProjectPrompts() {
   const { call } = usePanel()
+  const project = useContext(PromptProject)
   const [view, setView] = useState<PromptsView>()
   const [error, setError] = useState<Error>()
-  const reload = useCallback(async () => { setView(await call('GET prompts')) }, [call])
+  const reload = useCallback(async () => { setView(await call('GET prompts', project ? { query: { project } } : undefined)) }, [call, project])
   useEffect(() => { reload().catch(setError) }, [reload])
   return view ? <PromptsEditor view={view} reload={reload} /> : <LoadState loading error={error} />
 }
 
 function PromptsEditor({ view, reload }: { view: PromptsView; reload: () => Promise<void> }) {
   const { t, call, notify } = usePanel()
+  const project = useContext(PromptProject)
   const saved = withOverrides(view.current.config)
   const draft = useDraft<PromptConfig, PromptNote>({ key: `dsh-superagent/prompts/${view.masterId}`, saved, revision: view.revision,
     reload,
     save: async (config, baseRevision) => {
-      const result = await call('PUT prompts', { body: { config, baseRevision } })
+      const result = await call('PUT prompts', { ...(project ? { query: { project } } : {}), body: { config, baseRevision } })
       notify(t(result.context_delivery === 'pending' ? 'promptSavedPending' : 'saved'))
       return result
     } })
@@ -181,6 +195,7 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
   config: PromptConfig; view: PromptsView; dirty: boolean; revision: number; onEdit: (name: string) => void
 }) {
   const { t, call, notify } = usePanel()
+  const project = useContext(PromptProject)
   const [target, setTarget] = useState<Target>('orchestrator')
   const [compare, setCompare] = useState<'saved' | 'default'>(dirty ? 'saved' : 'default')
   // Keep the preview paired with the config it was composed from so diffs stay consistent until the next preview arrives.
@@ -188,7 +203,7 @@ function FullPrompt({ config, view, dirty, revision, onEdit }: {
   const [error, setError] = useState<Error>()
   useEffect(() => {
     let active = true
-    call('POST prompts/preview', { body: config }).then(value => { if (active) { setPreview({ config, value }); setError(undefined) } },
+    call('POST prompts/preview', { ...(project ? { query: { project } } : {}), body: config }).then(value => { if (active) { setPreview({ config, value }); setError(undefined) } },
       (failure: Error) => { if (active) setError(failure) })
     return () => { active = false }
   }, [call, config])
@@ -258,14 +273,15 @@ function PromptHistory({ view, from, onLoad }: {
   view: PromptsView; from: Origin | undefined; onLoad: (config: PromptConfig, from: Origin) => void
 }) {
   const { t, call } = usePanel()
+  const project = useContext(PromptProject)
   const [older, setOlder] = useState<Pick<PromptsView, 'revisions' | 'next_offset'>>()
   const next = older ? older.next_offset : view.next_offset
   const more = useAction(async (offset: number) => {
-    const page = await call('GET prompts', { query: { offset } })
+    const page = await call('GET prompts', { query: { offset, ...(project ? { project } : {}) } })
     setOlder({ revisions: [...older?.revisions ?? [], ...page.revisions], next_offset: page.next_offset })
   })
   const load = useAction(async (revision: number) => {
-    onLoad((await call('GET prompts', { query: { revision } })).current.config, { revision })
+    onLoad((await call('GET prompts', { query: { revision, ...(project ? { project } : {}) } })).current.config, { revision })
   })
   return <div className="dt-form">
     <Hint>{t('promptHistoryHint')}</Hint>

@@ -3,15 +3,20 @@ import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
 import type { Decision, Thread, Trigger } from '../core/index.ts'
 import type { Dropped, Receipt, TimelinePlace } from './store.ts'
 
+type ProjectFilter = { id: string; legacy: string }
+const projectFilter = (column: string) => `COALESCE(json_extract(${column}, '$.projectId'), ?) = ?`
+const projectArgs = (project?: ProjectFilter) => project ? [project.legacy, project.id] : []
+
 export function storeReads(db: DatabaseSync) {
   const values = <T>(sql: string, ...parameters: SQLInputValue[]): T[] => db.prepare(sql).all(...parameters).map(row => JSON.parse(String(row.value)) as T)
   return {
   /** Newest first by arrival (`rowid`) order rather than trigger timestamp. */
-  recentTriggers: (offset = 0, limit = 50): Trigger[] => db.prepare('SELECT value FROM trigger ORDER BY rowid DESC LIMIT ? OFFSET ?').all(limit, offset).map(row => JSON.parse(String(row.value)) as Trigger),
+  recentTriggers: (offset = 0, limit = 50, project?: ProjectFilter): Trigger[] => values(`SELECT value FROM trigger
+    ${project ? `WHERE ${projectFilter('value')}` : ''} ORDER BY rowid DESC LIMIT ? OFFSET ?`, ...projectArgs(project), limit, offset),
   /** Per-source trigger counts since `since`, plus the latest arrival timestamp across all time. */
-  triggerStats: (since: string): Record<string, { received: number; filtered: number; lastAt: string }> => {
+  triggerStats: (since: string, project?: ProjectFilter): Record<string, { received: number; filtered: number; lastAt: string }> => {
     const result: Record<string, { received: number; filtered: number; lastAt: string }> = {}
-    for (const row of db.prepare("SELECT json_extract(t.value, '$.source') AS source, MAX(t.at) AS last, SUM(t.at >= ?) AS received, SUM(t.at >= ? AND json_extract(d.value, '$.filtered') IS NOT NULL) AS filtered FROM trigger t LEFT JOIN disposition d ON d.id = t.id GROUP BY source").all(since, since))
+    for (const row of db.prepare(`SELECT json_extract(t.value, '$.source') AS source, MAX(t.at) AS last, SUM(t.at >= ?) AS received, SUM(t.at >= ? AND json_extract(d.value, '$.filtered') IS NOT NULL) AS filtered FROM trigger t LEFT JOIN disposition d ON d.id = t.id ${project ? `WHERE ${projectFilter('t.value')}` : ''} GROUP BY source`).all(since, since, ...projectArgs(project)))
       result[String(row.source)] = { received: Number(row.received ?? 0), filtered: Number(row.filtered ?? 0), lastAt: String(row.last ?? '') }
     return result
   },
@@ -19,10 +24,11 @@ export function storeReads(db: DatabaseSync) {
    * Counts triggers arriving at or after `since` that passed source filtering and reached a decision,
    * and how many accept/reopen decisions those same arrivals produced.
    */
-  flow: (since: string): { judged: number; accepted: number } => {
+  flow: (since: string, project?: ProjectFilter): { judged: number; accepted: number } => {
+    const scoped = project ? ` AND ${projectFilter('t.value')}` : ''
     const passed = "t.at >= ? AND NOT EXISTS (SELECT 1 FROM disposition s WHERE s.id = t.id AND json_extract(s.value, '$.filtered') IS NOT NULL)"
-    const judged = db.prepare(`SELECT COUNT(DISTINCT t.id) AS n FROM decision d, json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE ${passed}`).get(since)
-    const accepted = db.prepare(`SELECT COUNT(DISTINCT d.id) AS n FROM decision d, json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE json_extract(d.value, '$.kind') IN ('accept', 'reopen') AND t.at >= ?`).get(since)
+    const judged = db.prepare(`SELECT COUNT(DISTINCT t.id) AS n FROM decision d, json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE ${passed}${scoped}`).get(since, ...projectArgs(project))
+    const accepted = db.prepare(`SELECT COUNT(DISTINCT d.id) AS n FROM decision d, json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE json_extract(d.value, '$.kind') IN ('accept', 'reopen') AND t.at >= ?${scoped}`).get(since, ...projectArgs(project))
     return { judged: Number(judged?.n ?? 0), accepted: Number(accepted?.n ?? 0) }
   },
   triggers: (options: { source?: string; filtered?: boolean }, offset = 0, limit = 50): { items: Trigger[]; more: boolean } => {
@@ -51,17 +57,21 @@ export function storeReads(db: DatabaseSync) {
     const row = db.prepare(`SELECT t.value FROM trigger_thread x JOIN trigger t ON t.id = x.id WHERE x.thread = ? ${humanOnly ? 'AND x.human = 1' : ''} ORDER BY x.at ASC, t.rowid ASC LIMIT 1`).get(threadKeyValue)
     return row ? JSON.parse(String(row.value)) as Trigger : undefined
   },
-  search: (query: string, limit = 20): Trigger[] => {
+  search: (query: string, limit = 20, project?: ProjectFilter): Trigger[] => {
     const pattern = `%${query.replace(/[\\%_]/g, match => `\\${match}`)}%`
-    return db.prepare("SELECT value FROM trigger WHERE id = ? OR json_extract(value, '$.url') LIKE ? ESCAPE '\\' OR json_extract(value, '$.meta.messageId') = ? OR json_extract(value, '$.text') LIKE ? ESCAPE '\\' ORDER BY at DESC LIMIT ?").all(query, `${query.replace(/[\\%_]/g, match => `\\${match}`)}%`, query, pattern, limit).map(row => JSON.parse(String(row.value)) as Trigger)
+    const queryFilter = "(id = ? OR json_extract(value, '$.url') LIKE ? ESCAPE '\\' OR json_extract(value, '$.meta.messageId') = ? OR json_extract(value, '$.text') LIKE ? ESCAPE '\\')"
+    return values(`SELECT value FROM trigger WHERE ${queryFilter} ${project ? `AND ${projectFilter('value')}` : ''} ORDER BY at DESC LIMIT ?`, query, pattern, query, pattern, ...projectArgs(project), limit)
   },
-  recentDecisions: (offset = 0, limit = 50): Decision[] => db.prepare('SELECT value FROM decision ORDER BY rowid DESC LIMIT ? OFFSET ?').all(limit, offset).map(row => JSON.parse(String(row.value)) as Decision),
+  recentDecisions: (offset = 0, limit = 50, project?: ProjectFilter): Decision[] => project
+    ? values(`SELECT d.value FROM decision d WHERE EXISTS (SELECT 1 FROM json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE ${projectFilter('t.value')}) ORDER BY d.rowid DESC LIMIT ? OFFSET ?`, ...projectArgs(project), limit, offset)
+    : values('SELECT value FROM decision ORDER BY rowid DESC LIMIT ? OFFSET ?', limit, offset),
   /** Decisions matching `kinds` whose triggers arrived at or after `since`, aligned with `flow` window counts. */
-  decisions: (options: { kinds: string[]; since: string }, offset: number, limit: number): { items: Decision[]; more: boolean } => {
+  decisions: (options: { kinds: string[]; since: string; project?: ProjectFilter }, offset: number, limit: number): { items: Decision[]; more: boolean } => {
     const where = [...(options.kinds.length ? [`json_extract(d.value, '$.kind') IN (${options.kinds.map(() => '?').join(',')})`] : []),
       ...(options.since ? ["EXISTS (SELECT 1 FROM json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE t.at >= ?)"] : [])]
+    if (options.project) where.push(`EXISTS (SELECT 1 FROM json_each(json_extract(d.value, '$.triggerIds')) j JOIN trigger t ON t.id = j.value WHERE ${projectFilter('t.value')})`)
     const rows = db.prepare(`SELECT d.value FROM decision d ${where.length ? `WHERE ${where.join(' AND ')}` : ''} ORDER BY d.rowid DESC LIMIT ? OFFSET ?`)
-      .all(...options.kinds, ...(options.since ? [options.since] : []), limit + 1, offset)
+      .all(...options.kinds, ...(options.since ? [options.since] : []), ...projectArgs(options.project), limit + 1, offset)
     return { items: rows.slice(0, limit).map(row => JSON.parse(String(row.value)) as Decision), more: rows.length > limit }
   },
   /** Newest decisions of the given kinds, for surfaces that must surface rare outcomes among many ignores. */

@@ -21,6 +21,8 @@ export function isoTime(value: string): string {
 
 /** One immutable event produced by a source. `text` and `meta` are untrusted external data. */
 export interface Trigger {
+  projectId?: string
+  desk?: string
   id: string
   source: string
   /** Every thread the trigger belongs to; the first (`threads[0]`) is the primary thread that hosts its evaluation. */
@@ -277,6 +279,8 @@ export type TicketOutcome = 'completed' | 'merged' | 'closed' | 'dropped' | 'sto
 export interface Attention { id: string; question: string; triggerId?: string }
 /** Ticket aggregate: an authorized work item with its assignments, channels, thread bindings, and inputs. */
 export interface Ticket {
+  projectId?: string
+  desk?: string
   id: string
   title: string
   decisionId: string
@@ -314,7 +318,10 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string }
+export interface Execution {
+  name: string; directory: string; assignment: string
+  plan?: { projectId: string; root: string; mode: 'git' | 'shell'; prepare: string; repository: string; identity: string; baseline?: string; branch?: string }
+}
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

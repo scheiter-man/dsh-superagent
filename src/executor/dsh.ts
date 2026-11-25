@@ -1,3 +1,4 @@
+import { repositoryIdentity, type Projects } from '../app/projects.ts'
 /** DSH executor: manages one persistent worker session and workspace directory per ticket. */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -66,6 +67,7 @@ export interface ExecutorHost {
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir'>
+  readonly projects?: Projects
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -234,7 +236,10 @@ export class DshExecutor implements Executor {
   }
   /** Populates a newly accepted ticket's `execution` attributes (worktree name, workspace directory, and assignment text). */
   prepare(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>): Ticket {
-    return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
+    const execution = ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir)
+    const projects = this.host.projects
+    const plan = projects?.plan(projects.scope(ticket), ticket.id, execution.name)
+    return { ...ticket, execution: plan ? { ...execution, directory: join(plan.root, execution.name), plan } : execution }
   }
   private async workspaceIdentity(directory: string): Promise<string | undefined> {
     const entry = await lstat(directory, { bigint: true }).catch((error: NodeJS.ErrnoException) => {
@@ -259,16 +264,28 @@ export class DshExecutor implements Executor {
       if (prepared && (prepared.directory !== directory || prepared.identity !== existing)) {
         throw new Error('The verified workspace is missing or has been replaced. Restore the original directory or open a new ticket.')
       }
-      const command = this.host.store.settings().executor.prepare.trim()
+      const plan = ticket.execution!.plan
+      const command = (plan?.prepare ?? this.host.store.settings().executor.prepare).trim()
+      if (plan?.mode === 'git' && !prepared && repositoryIdentity(plan.repository) !== plan.identity) throw new Error('Registered Git repository was replaced')
+      const expectedWorktree = async () => {
+        if (!plan?.branch || repositoryIdentity(directory) !== plan.identity) return false
+        const runner = this.host.context.subprocess, env = this.host.childEnvironment(), signal = this.host.lifetime
+        return (await runAsWorker(runner, ['git', 'symbolic-ref', '--short', 'HEAD'], directory, signal, env)).trim() === plan.branch
+          && (await runAsWorker(runner, ['git', 'rev-parse', 'HEAD'], directory, signal, env)).trim() === plan.baseline
+      }
       if (!prepared) {
         // Only a previously started assignment is evidence for adopting a workspace from an older bundle.
         const legacy = existing && ticket.assignments.some(assignment => assignment.startedAt)
-        if (existing && !legacy) throw new Error('An unverified directory already exists. Move it aside before retrying.')
+        if (existing && !legacy && !await expectedWorktree()) throw new Error('An unverified directory already exists. Move it aside before retrying.')
         if (!existing) {
           await mkdir(dirname(directory), { recursive: true })
+          if (plan && await realpath(dirname(directory)) !== plan.root) throw new Error('Worktree root changed after admission')
           const env = { ...this.host.childEnvironment(), ...Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value])) }
           const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-          if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
+          if (plan?.mode === 'git') {
+            await runAsWorker(this.host.context.subprocess, ['git', '-C', plan.repository, 'worktree', 'add', '-b', plan.branch!, directory, plan.baseline!], dirname(directory), signal, env)
+            if (!await expectedWorktree()) throw new Error('Created worktree does not match the ticket plan')
+          } else if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
             .catch(async (error: unknown) => { await rmdir(directory).catch(() => {}); throw error })
           await mkdir(directory, { recursive: true })
         }
@@ -456,7 +473,7 @@ export class DshExecutor implements Executor {
       this.relay(resultRelay(updated, 'failed', summary))
     })
   }
-  private relay({ id, text }: { id: string; text: string }): void { this.host.sessions.relay(id, text) }
+  private relay({ id, text, projectId }: { id: string; text: string; projectId?: string }): void { this.host.sessions.relay(id, text, projectId) }
   private async launch(ticket: Ticket, assignment: Assignment): Promise<void> {
     const current = () => {
       if (this.host.closing()) throw new Error('dsh-superagent is stopping')

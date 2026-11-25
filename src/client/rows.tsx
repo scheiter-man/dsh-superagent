@@ -21,7 +21,7 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       <div className="dt-row-title"><button type="button" className="dt-open" onClick={() => navigate({ page: 'execution',
         id: ticket.id })}>{ticket.title}</button></div>
       <div className="dt-row-meta dt-ticket-meta">
-        {ticket.desk && <Tag>{ticket.desk}</Tag>}
+        {ticket.projectName && <Tag tone="info">{ticket.projectName}</Tag>}{ticket.desk && <Tag>{ticket.desk}</Tag>}
         {ticket.threads.map(thread => <ThreadChip key={thread.key} thread={thread} />)}
         {context && <ContextTag />}
         {ticket.undelivered > 0 && <LabelValue label={t('ticketUndeliveredLabel')} value={ticket.undelivered} />}
@@ -84,7 +84,7 @@ export function DecisionLine({ decision }: { decision: DecisionRow }) {
   const reason = decision.reason ? reasonLabel(t, decision.reason) : ''
   const open = () => decision.ticketId ? navigate({ page: 'execution', id: decision.ticketId })
     : navigate({ page: 'trigger', id: decision.thread, query: { trigger: decision.triggerIds[0] ?? '' } })
-  return <li className="dt-row dt-link dt-ticket">
+  return <li className="dt-row dt-link dt-ticket">{decision.projectName && <Tag tone="info">{decision.projectName}</Tag>}{decision.desk && <Tag>{decision.desk}</Tag>}
     <div className="dt-ticket-stage"><StageMark state={mark.dot} icon={mark.icon} label={mark.label} /></div>
     <div className="dt-ticket-body">
       <div className="dt-row-title">
