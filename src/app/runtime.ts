@@ -256,24 +256,29 @@ export class Runtime extends Service implements SourceHost {
     const result = await this.settings.pause(false, 'panel')
     if (this.setup.configured() && !this.closing()) {
       await this.sessions.ensureMaster()
-      for (const sessionId of this.heldInboxes) {
-        if (sessionId === this.masterId) continue
-        const ticket = this.store.tickets.get(sessionId.slice('worker-'.length))
-        // Recovered assignments launch through the normal scheduler and acquire its worker slot.
-        if (ticket && !ticket.ended && ticketStage(ticket).stage !== 'working') {
-          await this.ctx.sessionController.resolveAgent(sessionId)
-        }
-      }
+      await this.restoreInboxes()
     }
-    this.heldInboxes.clear()
     this.startupHoldCount = 0
     this.passes.request()
     return { ...result, startupHold: this.startupHold }
   }
+  private async restoreInboxes(): Promise<void> {
+    for (const sessionId of this.heldInboxes) {
+      if (this.closing()) return
+      if (!sessionId.startsWith('worker-')) continue
+      const ticket = this.store.tickets.get(sessionId.slice('worker-'.length))
+      // Recovered working assignments acquire their slot through the normal scheduler.
+      if (ticket && !ticket.ended && ticketStage(ticket).stage !== 'working') {
+        await this.ctx.sessionController.resolveAgent(sessionId)
+      }
+    }
+    this.heldInboxes.clear()
+  }
   private async initialize(): Promise<void> {
     this.disposers.push(this.sources.register(localKind))
     this.stopHttp = registerHttp(this.ctx, this.httpHost())
-    if (this.store.settings().executor.onRestart === 'pause') this.startupHoldCount = await this.recoverableCount()
+    const recoverable = await this.recoverableCount()
+    if (this.store.settings().executor.onRestart === 'pause') this.startupHoldCount = recoverable
     if (this.closing()) return
     const configured = await this.setup.run(this.store.settings())
     if (this.closing()) return
@@ -285,6 +290,8 @@ export class Runtime extends Service implements SourceHost {
       for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
       if (this.closing()) return
       this.executor.resume()
+      if (!this.paused()) await this.restoreInboxes()
+      if (this.closing()) return
       this.passes.start()
       this.effects.start()
     }

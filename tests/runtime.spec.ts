@@ -1867,3 +1867,17 @@ it('holds the Router before activating a restored DSH inbox', async () => {
   expect(await api('POST', 'resume')).toMatchObject({ status: 200, body: { startupHold: false } })
   expect(controller.resolveAgent).toHaveBeenCalledWith(master)
 })
+
+
+it('activates a settled worker with a durable inbox in auto mode', async () => {
+  const { sessionId } = await acceptedTicket()
+  await runtime.idle()
+  runtime.engine.report(runtime.store.tickets.list()[0]!.id, { state: 'waiting', summary: 'Awaiting input' })
+  services.sessionController = { ...controller, projections: vi.fn(async ({ sessionId: id }) => id === sessionId
+    ? { values: { inbox: { 'next-turn': [{ source: { kind: 'user' } }], 'next-step': [] } } } : null) }
+  controller.resolveAgent.mockClear()
+  const next = await restart({}, { executor: { onRestart: 'auto' } })
+  await next.ready
+  expect(next.startupHold).toBe(false)
+  expect(controller.resolveAgent).toHaveBeenCalledWith(sessionId)
+})
