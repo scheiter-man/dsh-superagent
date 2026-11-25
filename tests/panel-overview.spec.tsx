@@ -2,7 +2,7 @@
 // The overview.
 import { expect, it } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, text } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, all, find, tab, click, field, type, text } from './fixtures/panel.tsx'
 import { server, droppedReply, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -10,7 +10,7 @@ it('leads the overview with the pending Tickets, then problems, the last day and
   await mount()
   expect(tab(zh['tab.overview']).getAttribute('aria-selected')).toBe('true')
   expect(all('[role="tab"]').map(tab => tab.textContent)).toEqual(['概览', '来源', '触发', '评估', '执行', '设置'])
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual(['新建专席工单+ 新建专席工单', '待处理工单2', '系统问题2', '过去 24 小时详情 ›', '执行器详情 ›'])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual(['待回答', '待处理失败'])
   expect(all('.dt-cards .dt-att-what').map(item => item.textContent)).toEqual(['飞书 来源异常', '评估未完成：这个文案好奇怪'])
   // Actions sit below the title and Threads, apart from the stage, each with its icon.
@@ -81,7 +81,7 @@ it('shows paused processing as a system problem with its resume action, and says
   await click(zh['tab.overview'])
   await click(find(zh.resumeProcessing, '.dt-att button'))
   await click(zh.confirm)
-  expect(server.requests.find(request => request.path === 'executor/pause')).toMatchObject({ method: 'POST', body: { paused: false } })
+  expect(server.requests.find(request => request.path === 'resume')).toMatchObject({ method: 'POST' })
 })
 
 it('offers the step that fixes a settings problem as a button on the overview', async () => {
@@ -125,7 +125,7 @@ it('words a refused retry in the interface language by its code', async () => {
 
 it('shows the overview in English', async () => {
   await mount(en)
-  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.pendingTickets}2`, `${en.problems}2`,
+  expect(all('.dt-section-title').map(title => title.textContent)).toEqual([`${en.newTicket}+ ${en.newTicket}`, `${en.pendingTickets}2`, `${en.problems}2`,
     `${en.lastDay}${en.details}`, `${en['term.executor']}${en.details}`])
   expect(all('.dt-cards .dt-ticket-stage').map(item => item.textContent)).toEqual([en['stage.answer'], en['stage.failed']])
   expect(all('.dt-stat-label').map(label => label.textContent)).toEqual([en.flowReceivedLabel, en.flowFilteredLabel, en.flowJudgedLabel,
@@ -156,4 +156,36 @@ it('says when no Source is on, an Eval is past its deadline or a message keeps f
   await click(tab(zh['tab.overview']))
   await click('评估超时未决定：#9 迟迟未决')
   expect(server.requests.some(request => request.path.startsWith('threads/github:9'))).toBe(true)
+})
+
+
+it('creates a custom-Desk ticket and reuses its request ID after inline authorization', async () => {
+  await mount()
+  await click(`+ ${zh.newTicket}`)
+  await type(field<HTMLSelectElement>(zh.ticketDesk), 'custom')
+  await type(field<HTMLInputElement>(zh.ticketCustomDesk), 'custom-desk')
+  await type(field<HTMLInputElement>(zh.ticketTitleInput), 'Review 2 documents')
+  await type(field<HTMLTextAreaElement>(zh.ticketInstructions), 'Check the example.')
+  server.unauthorized = true
+  await click(zh.newTicketSubmit)
+  await type(document.querySelector<HTMLInputElement>('input[type=password]')!, 'synthetic-operator-value')
+  await click(zh.operatorUnlock)
+  await click(zh.newTicketSubmit)
+  const requests = server.requests.filter(request => request.path === 'local/submit')
+  expect(requests).toHaveLength(2)
+  expect(requests[1]!.body).toEqual(requests[0]!.body)
+  expect(requests[1]!.body).toMatchObject({ desk: 'custom-desk', title: 'Review 2 documents', text: 'Check the example.',
+    workspace_name: 'review-documents', request_id: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+  expect(text()).toContain(zh.newTicketSuccess)
+  expect(text()).toContain(zh.newTicketOpen)
+})
+
+it('shows held startup work and resumes it through the operator action', async () => {
+  server.startupHoldCount = 3
+  await mount()
+  expect(text()).toContain(zh.heldTasks.replace('{count}', '3'))
+  await click(zh.resumeHeldTasks)
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.path === 'resume')).toMatchObject({ method: 'POST' })
+  expect(text()).not.toContain(zh.heldTasks.replace('{count}', '3'))
 })

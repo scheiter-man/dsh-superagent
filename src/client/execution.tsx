@@ -17,9 +17,10 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const { t, call, navigate } = usePanel()
   const [limit, setLimit] = useState(20)
   const { data, error, reload: reloadTickets } = usePoll(() => call('GET tickets', { query: { state: current, limit } }), [current, limit])
-  const { paused, load: { maxWorkers } } = state
+  const { paused: manualPaused, startupHold, load: { maxWorkers } } = state
+  const paused = manualPaused || startupHold
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
-  const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
+  const pause = async () => { if (paused) await call('POST resume'); else await call('POST executor/pause', { body: { paused: true } }); await reload() }
   const status = state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
     label: t('processingPaused') }
     : { tone: 'ongoing', label: t('executorRunning') }
@@ -96,6 +97,14 @@ export function ExecutionSettings() {
           <h2 className="dt-block-title">{t('term.executor')}<InfoTip text={t('executorIntro')} /></h2>
           <Section title={t('executorModel')} hint={t('executorModelHint')}><ModelField value={value.model}
             onChange={model => edit({ model })} /></Section>
+          <Field label={t('identityMode')}><select className="dt-select" value={value.identityMode} onChange={event =>
+            edit({ identityMode: event.target.value === 'isolated-bot' ? 'isolated-bot' : 'personal' })}>
+            <option value="personal">{t('identityPersonal')}</option><option value="isolated-bot">{t('identityBot')}</option>
+          </select></Field>
+          <Field label={t('onRestart')}><select className="dt-select" value={value.onRestart} onChange={event =>
+            edit({ onRestart: event.target.value === 'auto' ? 'auto' : 'pause' })}>
+            <option value="pause">{t('restartPause')}</option><option value="auto">{t('restartAuto')}</option>
+          </select></Field>
           <Field label={t('workerPermission')} hint={t('workerPermissionHint')}>
             <select className="dt-select" value={value.permissionPreset}
               onChange={event => edit({ permissionPreset: event.target.value === 'danger-full-access' ? 'danger-full-access' : 'workspace-write' })}>
@@ -112,7 +121,7 @@ export function ExecutionSettings() {
           <h2 className="dt-block-title">{t('term.environment')}<InfoTip text={t('environmentIntro')} /></h2>
           <Field label={t('executionDirectory')} hint={t('executionDirectoryHint')} note={value.directory ? undefined
             : t('executionDirectoryDefault', { root: environment.root })}>
-            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
+            <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false}
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>

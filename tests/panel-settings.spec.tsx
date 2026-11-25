@@ -56,7 +56,7 @@ it('saves the Eval block on the Policy settings and the Executor with its execut
   await pick(0, 'worker-provider'); await pick(1, 'worker-model'); await pick(2, 'high')
   expect([...(all('.dt-model select')[2] as HTMLSelectElement).options].map(option => option.value)).toEqual(['', 'high'])
   await click(zh.save)
-  expect(server.settings.executor).toEqual({ permissionPreset: 'danger-full-access', maxWorkers: 5, directory: '/srv/work',
+  expect(server.settings.executor).toEqual({ permissionPreset: 'danger-full-access', onRestart: 'pause', identityMode: 'personal', maxWorkers: 5, directory: '/srv/work',
     prepare: 'git worktree add "$DSH_SUPERAGENT_DIR"', blockedCommands: ['gh-personal', 'gh.other'], model: { provider: 'worker-provider',
       model: 'worker-model', reasoningEffort: 'high' } })
   expect(server.requests.filter(request => request.method === 'PUT').map(request => request.path)).toEqual(['settings/eval',

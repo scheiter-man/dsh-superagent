@@ -49,6 +49,10 @@ describe('configuration schema', () => {
       .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+    for (const stateDir of [String.raw`C:\state\superagent`, 'D:/state/superagent']) {
+      expect(machineOf(Config(minimal({ stateDir }))).stateDir).toBe(stateDir)
+    }
+    expect(() => Config(minimal({ stateDir: 'C:relative' }))).toThrow()
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })

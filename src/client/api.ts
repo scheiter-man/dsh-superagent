@@ -29,23 +29,14 @@ export interface ApiMessages {
 }
 const isUserError = (code: unknown): code is UserErrorCode => typeof code === 'string' && Object.hasOwn(USER_ERRORS, code)
 
-/** Kept in the open panel's memory only. A page reload clears authorization. */
-let operatorToken: string | undefined
-
 /** Calls one management endpoint; the `x-orchestrator-request` header marks the request as originating from this page. */
-async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown): Promise<T> {
+async function api<T>(messages: ApiMessages, path: string, method: string, body?: unknown, token?: string): Promise<T> {
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    const send = (token?: string) => fetch(`/orchestrator/api/${path}`, { method, ...json, headers: {
+    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: {
       'x-orchestrator-request': '1', ...json.headers, ...(token ? { authorization: `Bearer ${token}` } : {}),
     } })
-    response = await send(method === 'GET' ? undefined : operatorToken)
-    if (response.status === 401 && method !== 'GET') {
-      operatorToken = window.prompt('Superagent operator token / 操作员令牌')?.trim() || undefined
-      if (operatorToken) response = await send(operatorToken)
-      if (response.status === 401) operatorToken = undefined
-    }
   } catch {
     throw new ApiError(messages.offline, 0, { unreachable: true })
   }
@@ -116,14 +107,17 @@ export const DECISION_KINDS: Readonly<Record<DecisionFilter, string>> = { work: 
 export type Call = <K extends keyof Api>(route: K, ...request: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>])
   => Promise<ApiResponse<K>>
 /** Build a typed route caller that resolves localized error messages on each request. */
-export function caller(messages: () => ApiMessages): Call {
-  return (route, ...[request]) => {
+export function caller(messages: () => ApiMessages, token?: string, unauthorized?: () => void): Call {
+  return <K extends keyof Api>(route: K, ...[request]: {} extends ApiRequest<K> ? [request?: ApiRequest<K>] : [request: ApiRequest<K>]) => {
     const [method, pattern] = route.split(' ') as [string, string]
     const values = (request ?? {}) as Record<string, unknown> & { query?: Record<string, unknown>; body?: unknown }
     const path = pattern.replace(/:(\w+)/g, (_match, name: string) => encodeURIComponent(String(values[name])))
     const query = Object.entries(values.query ?? {}).filter(([, value]) => value !== undefined && value !== '')
       .map(([name, value]) => `${name}=${encodeURIComponent(String(value))}`).join('&')
-    return api(messages(), query ? `${path}?${query}` : path, method, values.body)
+    return api<ApiResponse<K>>(messages(), query ? `${path}?${query}` : path, method, values.body, token).catch(error => {
+      if (error instanceof ApiError && error.status === 401) unauthorized?.()
+      throw error
+    })
   }
 }
 

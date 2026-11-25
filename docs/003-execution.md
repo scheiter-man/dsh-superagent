@@ -79,7 +79,7 @@ Ticket-specific values come from its directory and originating Trigger. Other va
 
 Workers reach GitHub through the agent account's `gh` and Feishu through the bot's `lark-cli`. Blocked commands fail when invoked by name.
 
-These wrappers and directories establish defaults, not a security boundary. A worker can still execute a program by absolute path.
+Isolated-bot shims apply to commands spawned by Superagent. DSH tool shells have their own execution environment. Use OS account isolation where separate credentials must be enforced.
 
 ## Merging
 

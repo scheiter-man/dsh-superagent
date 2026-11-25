@@ -11,9 +11,9 @@ import { testAuthorization, testOperatorHash } from './fixtures/deployment.ts'
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
 /** Mount management HTTP routes on a fake web server and return a request helper that includes default panel headers. */
-function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1') {
+function serve(runtime: Partial<Record<keyof HttpHost, unknown>>, host = '127.0.0.1', admitted?: (req: { headers: Headers }) => number | undefined) {
   let handler: Handler = async () => {}
-  const ctx = { webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
+  const ctx = { get: (name: string) => name === 'connection' && admitted ? { requestRejection: admitted } : undefined, webServer: { host, port: 3082, register: (route: { handler: Handler }) => { handler = route.handler; return () => {} } } }
   registerHttp(ctx as never, { ready: Promise.resolve(), ...runtime, machine: { ...runtime.machine as object, operatorTokenHash: testOperatorHash } } as unknown as HttpHost)
   return async (method: string, path: string, body?: unknown, headers: Headers = {}) => {
     let status = 0, text = ''
@@ -98,4 +98,18 @@ it('answers a prompt save that lost a race with 409, and a settings body over 12
   expect(await call('PUT', 'settings/executor', { value, revision: 0 })).toEqual({ status: 400,
     body: { error: `Request exceeds ${128 * 1024} bytes` } })
   expect(saves).toEqual([])
+})
+
+
+it('accepts forwarded Desktop browser authentication or an operator token and rejects a stale instance', async () => {
+  const instanceId = 'local-instance'
+  const call = serve({ instanceId, startupHold: true, store: { settings: () => SettingsSchema.parse({ paused: true }) },
+    settings: { pause: async () => ({ paused: true }) } }, '127.0.0.1', req => req.headers.cookie === 'dsh-auth-fixture=valid' ? undefined : 401)
+  expect(await call('GET', 'health', undefined, { authorization: undefined })).toEqual({ status: 200,
+    body: { ok: true, instanceId, pid: process.pid, paused: true, startupHold: true } })
+  expect(await call('GET', 'settings', undefined, { authorization: undefined })).toMatchObject({ status: 401 })
+  expect(await call('POST', 'executor/pause', { paused: true }, { authorization: undefined, cookie: 'dsh-auth-fixture=forged' })).toMatchObject({ status: 401 })
+  expect(await call('POST', 'executor/pause', { paused: true }, { authorization: undefined, cookie: 'dsh-auth-fixture=valid' })).toMatchObject({ status: 200 })
+  expect(await call('POST', 'executor/pause', { paused: true }, { 'x-orchestrator-instance': 'stale' })).toMatchObject({ status: 409, body: { code: 'instance_mismatch' } })
+  expect(await call('POST', 'executor/pause', { paused: true }, { 'x-orchestrator-instance': instanceId })).toMatchObject({ status: 200 })
 })

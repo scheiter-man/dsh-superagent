@@ -1,7 +1,9 @@
 /** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and Executor load. */
-import type { ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
+import type { LocalSubmission } from '../app/local-intake.ts'
+import { Field } from './settings-kit.tsx'
 import { usePoll, type Problem } from './api.ts'
-import { Button, Icon } from './controls.tsx'
+import { Button, Icon, Input } from './controls.tsx'
 import { useAction, usePanel, usePanelData } from './provider.tsx'
 import { setupPage, settingsRoute, type Route } from './route.ts'
 import { TicketLine } from './rows.tsx'
@@ -35,7 +37,7 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
     case 'executor-paused': return row(t('problemPaused'), undefined, { page: 'execution' }, undefined,
       <ConfirmButton variant="outline" icon="play" label={t('resumeProcessing')} title={t('resumeProcessing')}
         message={t('resumeProcessingConfirm')}
-        onConfirm={async () => { await call('POST executor/pause', { body: { paused: false } }); await onChanged() }} />)
+        onConfirm={async () => { await call('POST resume'); await onChanged() }} />)
     case 'runtime-error': return row(t('problemRuntime', { name: valueLabel(t, 'health', problem.name) }), raw(problem.detail), undefined)
     case 'source-error': {
       const health = problem.source.health
@@ -60,8 +62,9 @@ function ProblemLine({ problem, onChanged }: { problem: Problem; onChanged: () =
 
 export function OverviewPage() {
   const { t, call, navigate } = usePanel()
-  const { setup } = usePanelData()
-  const { data, error, reload } = usePoll(() => call('GET overview'), [])
+  const { setup, state, reload: reloadState } = usePanelData()
+  const { data, error, reload } = usePoll(() => call('GET overview'), [call])
+  const refresh = async () => { await Promise.all([reload(), reloadState()]) }
   if (!data) return <LoadState error={error} loading />
   const stat = (label: string, value: ReactNode, route?: Route) => <span className="dt-stat">
     <span className="dt-stat-label">{label}</span>
@@ -71,15 +74,20 @@ export function OverviewPage() {
   const more = (route: Route) => <button type="button" className="dt-textlink dt-more-link"
     onClick={() => navigate(route)}>{t('details')}</button>
   return <>
+    {state?.startupHold && <Section title={t('heldTasks', { count: state.startupHoldCount })}>
+      <ConfirmButton variant="outline" icon="play" label={t('resumeHeldTasks')} title={t('resumeHeldTasks')}
+        message={t('resumeProcessingConfirm')} onConfirm={async () => { await call('POST resume'); await refresh() }} />
+    </Section>}
+    {!setup?.problem && <NewLocalTicket refresh={refresh} />}
     {error && <LoadState error={error} loading={false} />}
     <Section title={t('pendingTickets')} count={data.person.length}>
       {data.person.length ? <ul className="dt-list dt-cards">{data.person.map(ticket => <TicketLine key={ticket.id} ticket={ticket} question
-        onChanged={reload} />)}</ul>
+        onChanged={refresh} />)}</ul>
         : <Hint>{t('needsYouNone')}</Hint>}
     </Section>
     {data.problems.length > 0 && <Section title={t('problems')} count={data.problems.length}>
       <ul className="dt-list dt-cards">{data.problems.map((problem, index) => <ProblemLine key={index} problem={problem}
-        onChanged={reload} />)}</ul>
+        onChanged={refresh} />)}</ul>
     </Section>}
     <Section title={t('lastDay')} action={more({ page: 'trigger', query: { filter: 'recent' } })}>
       {/* Received and evaluated counts operate on Triggers rather than Threads or Decisions, so they do not link to filtered views. */}
@@ -100,4 +108,54 @@ export function OverviewPage() {
       </div>}
     </Section>
   </>
+}
+
+const DESKS = ['mentor', 'thesis', 'format', 'experiment', 'proto', 'infra'] as const
+
+function workspaceName(title: string): string {
+  const words = title.toLowerCase().normalize('NFKD').match(/[a-z]+[a-z0-9]*/g)?.slice(0, 4) ?? []
+  const [first, ...rest] = words
+  return first ? [first.replace(/\d.*$/, ''), ...rest].join('-').slice(0, 32).replace(/-$/, '') : 'local-ticket'
+}
+
+function NewLocalTicket({ refresh }: { refresh: () => Promise<void> }) {
+  const { call, notify, t, navigate } = usePanel()
+  const [open, setOpen] = useState(false)
+  const [desk, setDesk] = useState('mentor')
+  const [custom, setCustom] = useState('')
+  const [title, setTitle] = useState('')
+  const [text, setText] = useState('')
+  const [workspace, setWorkspace] = useState('')
+  const [ticket, setTicket] = useState<string>()
+  const pending = useRef<{ payload: string; id: string } | undefined>(undefined)
+  const action = useAction(async () => {
+    const value: Omit<LocalSubmission, 'request_id'> = { desk: desk === 'custom' ? custom.trim() : desk,
+      title: title.trim(), text, workspace_name: workspace.trim() || workspaceName(title) }
+    const payload = JSON.stringify(value)
+    if (pending.current?.payload !== payload) pending.current = { payload, id: globalThis.crypto.randomUUID() }
+    const receipt = await call('POST local/submit', { body: { ...value, request_id: pending.current.id } })
+    pending.current = undefined
+    setTicket(receipt.ticket_id); setOpen(false); setTitle(''); setText(''); setWorkspace('')
+    notify(t('newTicketSuccess'))
+    await refresh()
+  })
+  return <Section title={t('newTicket')} action={<Button type="button" size="sm" variant="outline" aria-expanded={open}
+    onClick={() => setOpen(!open)}>{open ? t('close') : `+ ${t('newTicket')}`}</Button>}>
+    {ticket && <button type="button" className="dt-textlink" onClick={() => navigate({ page: 'execution', id: ticket })}>
+      {t('newTicketOpen')}</button>}
+    {open && <form className="dt-form" onSubmit={event => { event.preventDefault(); void action.run() }}>
+      <Field label={t('ticketDesk')}><select className="dt-select" value={desk} onChange={event => setDesk(event.target.value)}>
+        {DESKS.map(value => <option value={value} key={value}>{value}</option>)}
+        <option value="custom">{t('ticketCustomDesk')}</option>
+      </select></Field>
+      {desk === 'custom' && <Field label={t('ticketCustomDesk')}><Input value={custom} required pattern="[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}"
+        onChange={event => setCustom(event.target.value)} /></Field>}
+      <Field label={t('ticketTitleInput')}><Input value={title} required maxLength={200} onChange={event => setTitle(event.target.value)} /></Field>
+      <Field label={t('ticketInstructions')}><textarea className="dt-input" value={text} required maxLength={60_000}
+        rows={5} onChange={event => setText(event.target.value)} /></Field>
+      <Field label={t('ticketWorkspaceInput')}><Input value={workspace} placeholder={workspaceName(title)} maxLength={32}
+        pattern="[a-z]+(?:-[a-z0-9]+){0,3}" onChange={event => setWorkspace(event.target.value)} /></Field>
+      <Button type="submit" variant="primary" disabled={action.busy || !title.trim() || !text.trim()}>{t('newTicketSubmit')}</Button>
+    </form>}
+  </Section>
 }

@@ -6,6 +6,7 @@ import { createServer, type Server } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it } from 'vitest'
 
@@ -50,7 +51,7 @@ afterEach(() => {
 })
 function run(...args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise(resolve => execFile('python3', [join(root, 'scripts', 'dsh-superagent'), ...args],
-    { env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_SUPERAGENT_PROFILE: '', DSH_SUPERAGENT_URL: '' },
+    { env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, DSH_SUPERAGENT_PROFILE: '', DSH_SUPERAGENT_URL: '', DSH_HOME: root },
       timeout: 20_000 },
     (error, stdout, stderr) => resolve({ code: typeof error?.code === 'number' ? error.code : 0, stdout, stderr })))
 }
@@ -255,4 +256,43 @@ it('backs up committed WAL data online, refuses overwrite, and works offline', a
     expect(await run('backup', '--state-dir', root, '--output', target)).toMatchObject({ code: 1, stderr: expect.stringContaining('already exists') })
   } finally { db.close() }
   expect(await run('backup', '--state-dir', root, '--output', join(root, 'offline.sqlite'))).toMatchObject({ code: 0 })
+})
+
+
+it('discovers the instance from a profile state path and retries a moved endpoint with the same local request', async () => {
+  const stateDir = join(root, 'storages', 'superagent'), profile = join(root, 'profiles', 'desktop')
+  mkdirSync(stateDir, { recursive: true }); mkdirSync(profile, { recursive: true })
+  writeFileSync(join(profile, 'cordis.patch.yml'), "- id: dsh-superagent\n  config:\n    stateDir: !!js dshHomePath('storages/superagent')\n")
+  const tokenFile = join(root, 'operator'), input = join(root, 'request')
+  writeFileSync(tokenFile, 'synthetic-test-operator-value-fixture', { mode: 0o600 })
+  writeFileSync(input, 'Check the example')
+  let instanceId = randomUUID(), calls: { body: unknown; instance: unknown }[] = []
+  const endpoint = () => writeFileSync(join(stateDir, 'runtime-endpoint.json'), JSON.stringify({ version: 1, instanceId,
+    host: '127.0.0.1', port: (server!.address() as AddressInfo).port, pid: process.pid, startedAt: new Date().toISOString() }), { mode: 0o600 })
+  server = createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json')
+    if (request.url?.endsWith('/health')) {
+      expect(request.headers.authorization).toBeUndefined()
+      response.end(JSON.stringify({ ok: true, instanceId, pid: process.pid })); return
+    }
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const body = JSON.parse(Buffer.concat(chunks).toString())
+    calls.push({ body, instance: request.headers['x-orchestrator-instance'] })
+    expect(request.headers.authorization).toBe('Bearer synthetic-test-operator-value-fixture')
+    if (calls.length === 1) {
+      instanceId = randomUUID(); endpoint()
+      response.writeHead(409).end(JSON.stringify({ code: 'instance_mismatch' })); return
+    }
+    response.end(JSON.stringify({ ticket_id: 'new-ticket' }))
+  })
+  await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+  endpoint()
+  expect(await run('submit', '--profile', 'desktop', '--token-file', tokenFile, '--request-id', 'test-request',
+    '--desk', 'mentor', '--title', 'Review', '--workspace-name', 'review', '--file', input))
+    .toMatchObject({ code: 0, stdout: expect.stringContaining('new-ticket'), stderr: '' })
+  expect(calls).toHaveLength(2)
+  expect(calls[1]!.body).toEqual(calls[0]!.body)
+  expect(calls[1]!.instance).toBe(instanceId)
+  expect(calls[1]!.instance).not.toBe(calls[0]!.instance)
 })

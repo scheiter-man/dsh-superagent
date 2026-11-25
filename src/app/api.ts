@@ -19,6 +19,8 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET health': { response: { ok: boolean; instanceId: string; pid: number; paused: boolean; startupHold: boolean } }
+  'POST resume': { response: { paused: boolean; startupHold: boolean } }
   'GET state': { response: StateView }
   'POST local/submit': { body: LocalSubmission; response: ReturnType<typeof submitLocal> }
   'GET overview': { response: OverviewView }

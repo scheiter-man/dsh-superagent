@@ -43,6 +43,11 @@ export interface HttpHost {
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
+  readonly instanceId: string
+  readonly startupHold: boolean
+  readonly startupHoldCount: number
+  closing(): boolean
+  resumeProcessing(): Promise<{ paused: boolean; startupHold: boolean }>
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
@@ -114,7 +119,8 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, instanceId: runtime.instanceId, paused: settings.paused, startupHold: runtime.startupHold,
+    startupHoldCount: runtime.startupHoldCount, health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -161,7 +167,9 @@ function routes(runtime: HttpHost): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET health': () => ({ ok: true, instanceId: runtime.instanceId, pid: process.pid, paused: runtime.store.settings().paused, startupHold: runtime.startupHold }),
     'GET state': () => stateView(runtime),
+    'POST resume': () => runtime.resumeProcessing(),
     'POST local/submit': async ({ body }) => {
       if (!runtime.configured()) throw new RouteError(503, 'Superagent is waiting for setup')
       const receipt = runtime.submitLocal(LocalSubmissionSchema.parse(await body(512 * 1024)))
@@ -241,26 +249,48 @@ function match(table: Routes, method: string, segments: string[]) {
   }
   return undefined
 }
-export function registerHttp(ctx: Context, runtime: HttpHost): () => void {
+export function registerHttp(ctx: Context, runtime: HttpHost): () => Promise<void> {
   if (ctx.webServer.host !== '127.0.0.1') throw new Error('Orchestrator management requires a loopback Web server')
   const table = routes(runtime)
-  const disposers = [
-    ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: async (req, res) => {
-      const url = new URL(req.url ?? '/', 'http://localhost')
-      if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
-      // The port is known once the server listens, which precedes every request it serves.
-      const port = ctx.webServer.port
-      if (port === undefined || !sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
-      if (req.method !== 'GET' && !authorized(req.headers.authorization, runtime.machine?.operatorTokenHash)) {
-        json(res, 401, { error: 'An operator bearer token is required for management changes' }); return
-      }
-      try {
-        await runtime.ready
-        const route = match(table, req.method ?? 'GET', url.pathname.slice('/orchestrator/api/'.length).split('/'))
-        if (!route) throw new RouteError(404, 'Unknown operation')
-        const query = Object.fromEntries(url.searchParams)
-        json(res, 200, await route.run({ params: route.params as never, query, body: maxBytes => readBody(req, maxBytes) }))
-      } catch (error) { json(res, ...failure(error)) }
-    } })]
-  return () => { for (const dispose of disposers) dispose() }
+  const active = new Map<IncomingMessage, Promise<void>>()
+  const ensureOpen = () => { if (runtime.closing?.()) throw new RouteError(503, 'Superagent is stopping') }
+  const connection = () => ctx.get?.('connection') as { requestRejection?(request: IncomingMessage): number | undefined } | undefined
+  const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const url = new URL(req.url ?? '/', 'http://localhost')
+    if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
+    const port = ctx.webServer.port
+    if (port === undefined || !sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
+    const method = req.method ?? 'GET'
+    const path = url.pathname.slice('/orchestrator/api/'.length)
+    const discovery = method === 'GET' && path === 'health'
+    const hash = runtime.machine?.operatorTokenHash
+    const browser = connection()
+    if (!discovery && !authorized(req.headers.authorization, hash) &&
+      !(typeof browser?.requestRejection === 'function' && browser.requestRejection(req) === undefined) && !(method === 'GET' && !hash && !browser)) {
+      json(res, 401, { error: 'Authenticate in DSH or enter the Superagent operator token' }); return
+    }
+    const instance = req.headers['x-orchestrator-instance']
+    if (method !== 'GET' && instance !== undefined && instance !== runtime.instanceId) {
+      json(res, 409, { code: 'instance_mismatch', error: 'Superagent restarted. Discover the new instance and retry.' }); return
+    }
+    try {
+      ensureOpen()
+      await runtime.ready
+      ensureOpen()
+      const route = match(table, method, path.split('/'))
+      if (!route) throw new RouteError(404, 'Unknown operation')
+      const body = async (maxBytes?: number) => { const value = await readBody(req, maxBytes); ensureOpen(); return value }
+      json(res, 200, await route.run({ params: route.params as never, query: Object.fromEntries(url.searchParams), body }))
+    } catch (error) { if (!res.destroyed) json(res, ...failure(error)) }
+  }
+  const unregister = ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: (req, res) => {
+    const pending = serve(req, res).finally(() => { active.delete(req) })
+    active.set(req, pending)
+    return pending
+  } })
+  return async () => {
+    unregister()
+    for (const req of active.keys()) if (req.complete === false) req.destroy()
+    await Promise.allSettled(active.values())
+  }
 }

@@ -10,6 +10,8 @@ const notices = (host: Host) => host.agents.get(host.runtime.masterId)!.inject.m
 it('delivers the relays, subscription changes and notifications that a version before the effect queue kept, once the migration queued them', async () => {
   h = await startRuntime(store => {
     // A schema 10 database, which the schema 11 migration brings up to date when the Runtime opens it.
+    const settings = store.settings()
+    store.saveSettings({ ...settings, executor: { ...settings.executor, onRestart: 'auto' } })
     store.set('schema', 10)
     store.set('relay-queue', [{ id: 'report:old', text: JSON.stringify({ kind: 'worker_report', ticket_id: 't1', state: 'ready' }) }])
     store.set('subscription-results', ['github:7'])

@@ -329,7 +329,7 @@ div.dt-preview-head { color: var(--dsw-alias-label-secondary); }
 .dt-ticket-meta { flex-wrap: nowrap; overflow: hidden; white-space: nowrap; }
 .dt-ticket-meta .dt-chip { flex: none; }
 .dt-ticket-note { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dsw-alias-label-primary); }
-.dt-ticket-note-error { color: var(--dsw-alias-state-error-primary); }
+.dt-ticket-error-note { color: var(--dsw-alias-state-error-primary); }
 .dt-ticket-actions { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 8px; min-height: 30px; margin-top: 2px; }
 /* Pass pointer events through action containers to the row link, keeping only child controls interactive. */
 .dt-ticket-actions, .dt-row-buttons, .dt-row-actions { pointer-events: none; }

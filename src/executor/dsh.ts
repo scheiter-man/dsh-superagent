@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { lstat, mkdir, realpath, rmdir } from 'node:fs/promises'
-import { dirname, join, relative, isAbsolute } from 'node:path'
+import { dirname, join, relative, isAbsolute, sep } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
   from '../core/index.ts'
@@ -69,6 +69,7 @@ export interface ExecutorHost {
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
+  childEnvironment(): NodeJS.ProcessEnv
   closing(): boolean
   /** Whether processing is paused, which holds launches and input deliveries. */
   paused(): boolean
@@ -95,7 +96,6 @@ export function mandateInstructions(mandate: Pick<Mandate, 'strength'>): string 
 export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutcome, { kind: 'accept' }>, settings: Settings,
   stateDir: string): Execution {
   const name = ticketWorktreeName(outcome.name ?? '', ticket.id)
-  const source = ticket.origin.triggerId
   const note = outcome.note ? `\nRouting note (not the source request): ${outcome.note}` : ''
   const ruleIds = ticket.mandate.basis.rules
   const rules = settings.policy.rules.filter(rule => ruleIds?.includes(rule.id))
@@ -244,7 +244,7 @@ export class DshExecutor implements Executor {
     if (!entry.isDirectory()) throw new Error('The workspace must be a real directory')
     const resolved = await realpath(directory)
     const state = relative(resolved, await realpath(this.host.machine.stateDir))
-    if (!state || !isAbsolute(state) && state !== '..' && !state.startsWith('../')) {
+    if (!state || !isAbsolute(state) && state !== '..' && !state.startsWith(`..${sep}`)) {
       throw new Error('A workspace cannot contain the Superagent state directory')
     }
     return key(resolved, String(entry.dev), String(entry.ino))
@@ -266,7 +266,7 @@ export class DshExecutor implements Executor {
         if (existing && !legacy) throw new Error('An unverified directory already exists. Move it aside before retrying.')
         if (!existing) {
           await mkdir(dirname(directory), { recursive: true })
-          const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
+          const env = { ...this.host.childEnvironment(), ...Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value])) }
           const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
           if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
             .catch(async (error: unknown) => { await rmdir(directory).catch(() => {}); throw error })
@@ -277,7 +277,7 @@ export class DshExecutor implements Executor {
       if (!identity || prepared && prepared.identity !== identity) throw new Error('The workspace was replaced during verification')
       const subprocess = this.host.context.subprocess
       const signal = this.host.lifetime
-      await verifyDirectory(directory, subprocess, signal)
+      await verifyDirectory(directory, subprocess, signal, this.host.childEnvironment())
       if (prepared) {
         if (identity !== await this.workspaceIdentity(directory)) throw new Error('The workspace was replaced during verification')
         return
@@ -287,7 +287,7 @@ export class DshExecutor implements Executor {
         throw error
       })
       const baseline = git
-        ? (await runAsWorker(subprocess, ['git', 'rev-parse', '--verify', 'HEAD'], directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))).trim()
+        ? (await runAsWorker(subprocess, ['git', 'rev-parse', '--verify', 'HEAD'], directory, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), this.host.childEnvironment())).trim()
         : 'directory'
       if (git && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baseline)) throw new Error('The workspace does not have a verifiable Git HEAD')
       if (identity !== await this.workspaceIdentity(directory)) throw new Error('The workspace was replaced during verification')
@@ -510,7 +510,7 @@ export class DshExecutor implements Executor {
     const ctx = this.host.context
     this.disposers.push(ctx.on('agent/status', ({ agent, status }) => {
       // A turn that starts ends the look at its worker's background work; the turn's own idle looks afresh.
-      if (status === 'running') { this.settling.get(ticketOfSession(agent.id) ?? '')?.abort(); return }
+      if (status === 'running') { const ticket = this.ticketOf(agent); if (ticket) this.settling.get(ticket.id)?.abort(); return }
       // The turn a stop of the worker's subagents woke and cancelled is no turn of the worker's.
       if (status !== 'idle' || cancelled.delete(agent) || this.host.closing()) return
       const ticket = this.ticketOf(agent)
@@ -519,14 +519,14 @@ export class DshExecutor implements Executor {
     }))
     // A person's message typed into a worker's Session, which the ticket does not record.
     this.disposers.push(ctx.on('agent/inbox/claimed', ({ agent, message }) => {
-      const ticketId = ticketOfSession(agent.id)
+      const ticketId = this.ticketOf(agent)?.id
       if (ticketId !== undefined && message.source.kind === 'user') this.personal.set(ticketId, now())
     }))
     // The Inputs a message of dsh-superagent's carries, which its worker reads once the Session took the message into its
     // history: a step that claimed it may be cancelled or fail before, which drops it.
     this.disposers.push(ctx.on('session/event', (session, event) => {
       const ticketId = ticketOfSession(session.id)
-      if (event.type !== 'user/message' || ticketId === undefined || event.data.source.kind !== 'dsh-superagent' || this.host.closing()) return
+      if (event.type !== 'user/message' || ticketId === undefined || !this.host.store.tickets.get(ticketId) || event.data.source.kind !== 'dsh-superagent' || this.host.closing()) return
       const message = event.data
       void this.background(Promise.resolve().then(() => {
         const read = this.host.store.tickets.get(ticketId)?.inputs.filter(input => input.kind === 'trigger' && !input.readAt

@@ -106,8 +106,10 @@ def management_url(url):
     return f'http://127.0.0.1:{parsed.port or 80}'
 
 
-def request(url, route, body=None, token=None):
+def request(url, route, body=None, token=None, instance=None, timeout=None):
     headers = {'x-orchestrator-request': '1'}
+    if instance:
+        headers['x-orchestrator-instance'] = instance
     if token:
         headers['Authorization'] = 'Bearer ' + token
     data = None
@@ -116,7 +118,7 @@ def request(url, route, body=None, token=None):
         data = json.dumps(body, ensure_ascii=False).encode('utf-8')
     query = urllib.request.Request(management_url(url) + '/orchestrator/api/' + route, data=data, headers=headers)
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
-    with opener.open(query, timeout=5 if body is not None else 2) as response:
+    with opener.open(query, timeout=timeout or (5 if body is not None else 2)) as response:
         return json.load(response)
 
 
@@ -133,15 +135,78 @@ def operator_token(args):
         return file.read(256).strip()
 
 
+def profile_state_dir(profile):
+    home = Path(os.environ.get('DSH_HOME', '').strip() or Path.home() / '.dsh').expanduser()
+    patch = home / 'profiles' / profile / 'cordis.patch.yml'
+    if not patch.is_file():
+        return None
+    active = False
+    for line in patch.read_text(encoding='utf-8-sig').splitlines():
+        if line.startswith('- '):
+            active = re.fullmatch(r"-\s+id:\s*['\"]?dsh-superagent['\"]?\s*(?:#.*)?", line) is not None
+        match = re.match(r'\s+stateDir:\s*(.+)', line) if active else None
+        if not match:
+            continue
+        value = re.split(r'\s+#', match[1], maxsplit=1)[0].strip()
+        home_path = re.fullmatch(r"!!js\s+dshHomePath\(\s*(['\"])([^'\"\\]+)\1\s*\)", value)
+        if home_path:
+            return home / home_path[2]
+        if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        candidate = Path(value)
+        if candidate.is_absolute():
+            return candidate
+        raise ValueError('Unsupported stateDir expression in profile patch. Use --state-dir.')
+    return None
+
+
+def discover(state_dir, timeout=0.6):
+    path = Path(state_dir) / 'runtime-endpoint.json'
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'r', encoding='utf-8') as file:
+        meta = os.fstat(file.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_uid != os.getuid() or meta.st_mode & 0o077:
+            raise ValueError('runtime-endpoint.json must be a private regular file owned by the operator.')
+        endpoint = json.loads(file.read(4096))
+    if not isinstance(endpoint, dict):
+        raise ValueError('Malformed runtime-endpoint.json.')
+    pid, port, instance = endpoint.get('pid'), endpoint.get('port'), endpoint.get('instanceId')
+    if (endpoint.get('version') != 1 or endpoint.get('host') != '127.0.0.1'
+            or type(pid) is not int or pid <= 0 or type(port) is not int or not 0 < port < 65536
+            or not isinstance(instance, str) or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', instance)):
+        raise ValueError('Malformed runtime-endpoint.json.')
+    os.kill(pid, 0)
+    url = f'http://127.0.0.1:{port}'
+    health = request(url, 'health', timeout=timeout)
+    if not isinstance(health, dict) or health.get('ok') is not True or health.get('pid') != pid or health.get('instanceId') != instance:
+        raise RuntimeError('Superagent endpoint changed before discovery completed.')
+    return url, instance, health
+
+
 def manage(args, route, body):
     token = operator_token(args)
     if not re.fullmatch(r'[A-Za-z0-9_-]{32,128}', token):
         raise RuntimeError('The operator token has an invalid format.')
-    try:
-        receipt = request(args.url, route, body=body, token=token)
-    except urllib.error.HTTPError as error:
-        detail = json.load(error).get('error', str(error)) if error.headers.get_content_type() == 'application/json' else str(error)
-        raise RuntimeError(f'HTTP {error.code}: {detail}') from None
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            if args.discovery:
+                url, instance, _ = discover(args.discovery, min(0.6, max(0.05, deadline - time.monotonic())))
+                receipt = request(url, route, body, token, instance, max(0.05, deadline - time.monotonic()))
+            else:
+                receipt = request(args.url, route, body, token)
+            break
+        except urllib.error.HTTPError as error:
+            detail = json.load(error) if error.headers.get_content_type() == 'application/json' else {}
+            if not isinstance(detail, dict):
+                detail = {}
+            if not (args.discovery and (error.code == 503 or error.code == 409 and detail.get('code') == 'instance_mismatch')
+                    and time.monotonic() < deadline):
+                raise RuntimeError(f"HTTP {error.code}: {detail.get('error', str(error))}") from None
+        except (OSError, RuntimeError, json.JSONDecodeError):
+            if not args.discovery or time.monotonic() >= deadline:
+                raise
+        time.sleep(min(0.15, max(0, deadline - time.monotonic())))
     print(json.dumps(receipt, ensure_ascii=False, indent=2))
     return 0
 
@@ -182,10 +247,10 @@ def backup(state_dir, output):
     return 0
 
 
-def state(url):
+def state(url, token=None):
     """Fetch health and setup status from the management API, or return None if unreachable."""
     try:
-        value = request(url, 'state')
+        value = request(url, 'state', token=token)
         # Keys omitted by another version read as empty so the service is not mistaken for unreachable.
         health, setup = value.get('health') or {}, value.get('setup') or {}
         entries = {name: entry if isinstance(entry, dict) else {} for name, entry in health.items()}
@@ -222,8 +287,19 @@ def outcome(pids, current):
 
 def status(args):
     pids = processes(args.profile)
-    current = state(args.url) if pids else None
-    print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': args.url,
+    url = args.url
+    current = None
+    if args.discovery:
+        try:
+            url, _, health = discover(args.discovery)
+            pids = [health['pid']] if not pids else pids
+            token = operator_token(args) if args.token_file else None
+            current = state(url, token) or {'health': {'runtime': 'ready'}, 'errors': {}, 'setup': None, 'feishu': None}
+        except (OSError, RuntimeError, ValueError):
+            pass
+    elif pids:
+        current = state(url, operator_token(args) if args.token_file else None)
+    print(json.dumps({'pids': pids, 'cwd': str(ROOT), 'url': url,
                       'manually_stopped': stopped(args.profile), 'health': current and current['health'],
                       'errors': current and current['errors'], 'setup': current and current['setup'],
                       'feishu': current and current['feishu']}, ensure_ascii=False, indent=2))
@@ -273,6 +349,10 @@ def start(args):
             raise RuntimeError('Both dsh and tmux must be on PATH.')
         exists = subprocess.run(['tmux', 'has-session', '-t', '=' + session],
                                 capture_output=True).returncode == 0
+        if args.discovery:
+            try: discover(args.discovery)
+            except (OSError, RuntimeError): pass
+            else: raise RuntimeError('Superagent already answers through this state directory.')
         if state(args.url) is not None:
             raise RuntimeError('An existing orchestrator answers at this URL; refusing duplicate startup.')
         stamp = time.strftime('%Y%m%d-%H%M%S')
@@ -295,7 +375,14 @@ def start(args):
     (control(args.profile) / 'manually-stopped').unlink(missing_ok=True)
     deadline = time.monotonic() + args.timeout
     while time.monotonic() < deadline:
-        current = state(args.url)
+        if args.discovery:
+            try:
+                endpoint_url, _, _ = discover(args.discovery)
+                current = state(endpoint_url, operator_token(args) if args.token_file else None) or {'health': {'runtime': 'ready'}, 'errors': {}, 'setup': None, 'feishu': None}
+            except (OSError, RuntimeError, json.JSONDecodeError):
+                current = None
+        else:
+            current = state(args.url, operator_token(args) if args.token_file else None)
         if processes(args.profile) and runtime_up(current):
             code = status(args)
             if current['setup']:
@@ -317,7 +404,7 @@ def main():
     parser.add_argument('action', choices=['start', 'stop', 'restart', 'status', 'pause', 'resume', 'submit', 'backup', 'init-token'])
     parser.add_argument('--profile', default=os.environ.get('DSH_SUPERAGENT_PROFILE') or 'superagent',
                         help='DSH profile that loads dsh-superagent; its tmux session is dsh-<profile>.')
-    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or 'http://127.0.0.1:3082',
+    parser.add_argument('--url', default=os.environ.get('DSH_SUPERAGENT_URL') or None,
                         help='Health-check URL; override after changing the profile port.')
     parser.add_argument('--timeout', type=float, default=60, help='Startup timeout in seconds.')
     parser.add_argument('--stop-timeout', type=float, default=300,
@@ -330,7 +417,7 @@ def main():
     parser.add_argument('--title', help='Explicit deliverable title for a local submission.')
     parser.add_argument('--workspace-name', help='Short English worktree name for a local submission.')
     parser.add_argument('--file', help='UTF-8 submission body file, or - for stdin.')
-    parser.add_argument('--state-dir', help='Superagent state directory for an online or offline backup.')
+    parser.add_argument('--state-dir', help='Superagent state directory for discovery or SQLite backup.')
     parser.add_argument('--output', help='New file for backup or init-token.')
     args = parser.parse_args()
     if args.timeout <= 0 or args.stop_timeout <= 0:
@@ -346,9 +433,12 @@ def main():
         if not args.state_dir or not args.output:
             parser.error('backup requires --state-dir and --output')
         return backup(args.state_dir, args.output)
-    args.url = management_url(args.url)
-    if args.action in ('pause', 'resume'):
-        return manage(args, 'executor/pause', {'paused': args.action == 'pause'})
+    args.discovery = (args.state_dir or profile_state_dir(args.profile)) if args.url is None else None
+    args.url = management_url(args.url or 'http://127.0.0.1:3082')
+    if args.action == 'pause':
+        return manage(args, 'executor/pause', {'paused': True})
+    if args.action == 'resume':
+        return manage(args, 'resume', {})
     if args.action == 'submit':
         if not all((args.request_id, args.desk, args.title, args.workspace_name, args.file)):
             parser.error('submit requires --request-id, --desk, --title, --workspace-name and --file')

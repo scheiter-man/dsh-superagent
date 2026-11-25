@@ -10,7 +10,7 @@ import { key, liveTicket, type Ticket } from '../core/index.ts'
 import { mandateInstructions, ticketOfSession } from '../executor/dsh.ts'
 import type { HealthEntry } from '../infra/health.ts'
 import { AgentDelivery, messageId } from './delivery.ts'
-import type { Effects } from './effects.ts'
+import { Later, type Effects } from './effects.ts'
 import type { Variable } from './execution-environment.ts'
 import { RetryHealth } from './retry-health.ts'
 import { initializeRoleModel } from './role-models.ts'
@@ -34,6 +34,8 @@ export interface SessionsHost {
   /** The workspace directory a main Session is created in. */
   readonly masterCwd: string
   readonly lifetime: AbortSignal
+  paused(): boolean
+  startupHeld(): boolean
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -105,13 +107,14 @@ export class Sessions {
     this.current = host.masterId
     this.agentDelivery = new AgentDelivery(host.context)
     // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.promptMaster(requestId, text, 'steer'), { ordered: true })
-    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
+    host.effects.handle('relay', ({ text }, requestId) => this.promptMaster(requestId, text, 'steer'), { ordered: true, limit: () => host.paused() ? 0 : 1 })
+    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true, limit: () => host.startupHeld() ? 0 : 1 })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
     const ctx = this.ctx
     ctx.on('agent/disposed', ({ agent }) => {
+      if (!this.bindings.has(agent)) return
       this.release(agent)
       this.retryHealth.clear(agent.id); this.updateModelHealth()
     })
@@ -135,7 +138,7 @@ export class Sessions {
       })
     })
     ctx.on('agent/status', ({ agent, status }) => {
-      if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
+      if (status === 'idle' && this.bindings.has(agent) && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
   /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, applies the configured worker permission preset, and renames it to `title`. */
@@ -239,6 +242,9 @@ export class Sessions {
   }
   /** Injects a notice into the main Session without waking it, replacing an archived main Session first; no-op if the main Session does not exist yet. */
   private async inject(name: string, value: Record<string, unknown>, summary: string): Promise<void> {
+    if (this.host.paused() && (!this.ctx.agents.get(this.current as SessionId) || this.archived(this.current))) {
+      throw new Later('The paused router has not been activated')
+    }
     await this.replaceArchivedMaster()
     const resolved = await this.ctx.sessionController.resolveAgent(this.current as SessionId)
     if ('error' in resolved) return
@@ -306,7 +312,7 @@ export class Sessions {
     } catch { return false }
   }
   private async decorate(agent: Agent): Promise<void> {
-    if (this.bindings.has(agent)) return
+    if (this.host.closing() || this.bindings.has(agent)) return
     const host = this.host
     const master = agent.id === this.masterId
     const ticket = master ? undefined : this.ticketOf(agent)

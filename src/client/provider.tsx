@@ -1,5 +1,6 @@
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Button, Input } from './controls.tsx'
 import { createPortal } from 'react-dom'
 import { caller, usePoll, type ApiMessages, type Call, type SetupView, type StateView } from './api.ts'
 import type { Route } from './route.ts'
@@ -79,7 +80,14 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
   copy.current = t
-  const call = useMemo(() => caller(() => messages(copy.current)), [])
+  const [token, setToken] = useState<string>()
+  const [locked, setLocked] = useState(false)
+  const [entry, setEntry] = useState('')
+  const activeToken = useRef(token)
+  activeToken.current = token
+  const call = useMemo(() => caller(() => messages(copy.current), token, () => {
+    if (token === activeToken.current) setLocked(true)
+  }), [token])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
@@ -102,6 +110,17 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
     reload, restarts])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>
     <style>{STYLES}</style>
+    {locked && <form className="dt-form dt-block" onSubmit={event => {
+      event.preventDefault()
+      const next = entry.trim()
+      if (!next) return
+      setToken(next); setEntry(''); setLocked(false)
+      if (next === token) void reload()
+    }}>
+      <label className="dt-field">{t('operatorToken')}<Input type="password" autoComplete="off" value={entry}
+        onChange={event => setEntry(event.target.value)} required /></label>
+      <Button type="submit" variant="primary">{t('operatorUnlock')}</Button>
+    </form>}
     {children}
     {toast && <Toast key={toast.id} text={toast.text} onDone={() => setToast(undefined)} />}
   </PanelState.Provider></Panel.Provider>

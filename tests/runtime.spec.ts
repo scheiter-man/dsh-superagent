@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -11,7 +11,6 @@ import { Runtime } from '../src/app/runtime.ts'
 import { jobRegistry } from './fixtures/host.ts'
 import { evalsHealth } from '../src/app/views/overview.ts'
 import { mandateInstructions } from '../src/executor/dsh.ts'
-import { masterPrompt } from '../src/app/context.ts'
 import { reference, testAuthorization, testMachine, testOperatorHash } from './fixtures/deployment.ts'
 import type { Machine } from '../src/deployment.ts'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
@@ -87,7 +86,7 @@ const OTHER = () => join(directory, 'other-gh')
 const BOT = () => join(directory, 'lark-bot')
 const HELPERS = 'git config -z --show-origin --get-all credential.https://github.com.helper'
 const SCOPED = 'git config -z --show-scope --get-regexp ^(credential\\..*|http\\..*extraheader)$'
-const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; env?: NodeJS.ProcessEnv }) => {
   // Strip leading `env` and `KEY=VALUE` arguments before looking up the command response.
   const argv = [...spec.argv]
   while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
@@ -96,12 +95,12 @@ const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
   return { done: Promise.resolve({ exitCode: answer instanceof Error ? 1 : 0, signal: null }), collected: { stdout: reader(answer instanceof Error ? '' : answer), stderr: reader(answer instanceof Error ? answer.message : '') } }
 }) }
 /** Source account overrides for test setup; `feishu: null` disables the Feishu source. */
-interface Accounts { github?: Record<string, unknown>; feishu?: Record<string, unknown> | null }
+interface Accounts { github?: Record<string, unknown>; feishu?: Record<string, unknown> | null; executor?: Partial<ReturnType<typeof SettingsSchema.parse>['executor']> }
 function seed(store: Store, accounts: Accounts = {}): void {
   const settings = store.settings()
   const { feishu: _feishu, ...others } = settings.sources
   const feishu = accounts.feishu === null ? undefined : { ...settings.sources.feishu?.config, cli: BOT(), ...accounts.feishu }
-  store.saveSettings(SettingsSchema.parse({ ...settings, sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
+  store.saveSettings(SettingsSchema.parse({ ...settings, executor: { ...settings.executor, onRestart: 'auto', identityMode: 'isolated-bot', ...accounts.executor }, sources: { ...others, github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), pollNotifications: true, ...accounts.github } }, ...feishu ? { feishu: { enabled: true, config: feishu } } : {} } }))
 }
 let restarts: ReturnType<typeof vi.fn<() => void>>
 async function restart(machine: Partial<Machine> = {}, accounts: Accounts = {}): Promise<Runtime> {
@@ -212,7 +211,7 @@ beforeEach(async () => {
   await runtime.ready
   // Source kinds are normally registered by plugins that are not loaded in unit tests.
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
-  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT() } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
+  runtime.store.saveSettings({ ...runtime.store.settings(), policy: { ...runtime.store.settings().policy, sources: { feishu: { allowed: [{ id: MEMBER, name: 'Alice' }], syncChat: CHAT }, github: { allowed: [{ id: 'alice' }] } } }, eval: { ...runtime.store.settings().eval, mode: 'auto' }, sources: { github: { enabled: true, config: { repository: 'acme/widgets', cli: AGENT(), pollNotifications: true } }, feishu: { enabled: true, config: { cli: BOT(), chats: [{ chatId: CHAT, listen: 'all' }], directMessages: true } } } })
   deliveries.mockClear()
 })
 afterEach(async () => { expect(controller.prompt).not.toHaveBeenCalled(); await runtime?.stop(); vi.restoreAllMocks(); rmSync(directory, { recursive: true, force: true }) })
@@ -599,7 +598,7 @@ it('reports a Source that was switched on as starting until its next pass report
 })
 
 it('records each settings save with its policy change and the open tickets told about it', async () => {
-  const { ticket } = await acceptedTicket()
+  await acceptedTicket()
   const settings = runtime.store.settings()
   await runtime.settings.save('executor', { ...settings.executor, maxWorkers: 5 }, runtime.store.blockRevision('executor'), 'panel')
   // What a Source receives is its own configuration, not the Policy; who may originate work there is the Policy's.
@@ -848,10 +847,8 @@ it('reports each setup problem where the operator fixes it, and checks the agent
   await needs('github', 'repositoryReadOnly', { account: 'agent-bot', repository: 'acme/widgets' })
   answers[`${AGENT()} api repos/acme/widgets --jq {name: .full_name, push: .permissions.push}`] = '{"name":"acme/widgets","push":true}\n'
   // The agent CLI runs in the workers' environment: without the shims on PATH.
-  const check = subprocess.spawn.mock.calls.map(([spec]) => spec.argv).find(argv => argv.includes(AGENT()))!
-  expect(check[0]).toBe('env')
-  expect(check[1]!.startsWith('PATH=')).toBe(true)
-  expect(check[1]!.slice('PATH='.length).split(':')).not.toContain(join(directory, 'worker-bin'))
+  const check = subprocess.spawn.mock.calls.map(([spec]) => spec).find(spec => spec.argv[0] === AGENT())!
+  expect(check.env?.PATH?.split(':')).not.toContain(join(directory, 'worker-bin'))
   const valid = { ...answers }
   // git older than 2.32 ignores GIT_CONFIG_GLOBAL and reads the operator's configuration.
   answers = { ...valid, [HELPERS]: 'file:/home/me/.gitconfig\0!gh auth git-credential\0' }
@@ -1001,9 +998,9 @@ it('writes worker shims and the agent environment from the configuration only, a
   expect(readFileSync(join(bin, 'lark-cli'), 'utf8')).toContain('lark-cli is unavailable: this installation has no Feishu bot.')
   expect(readFileSync(join(bin, 'gh'), 'utf8')).toContain(`exec '${AGENT()}'`)
   expect(readFileSync(workerGitConfig(directory), 'utf8')).toContain(`[credential "https://github.com"]\n\thelper = "${credentialHelper(AGENT())}"`)
-  expect(process.env).toMatchObject({ GIT_CONFIG_GLOBAL: workerGitConfig(directory), GIT_CONFIG_NOSYSTEM: '1' })
-  expect(process.env.GIT_AUTHOR_NAME).toBeUndefined()
-  expect(process.env.PATH?.split(':')[0]).toBe(bin)
+  expect(next.setup.workerEnvironment).toMatchObject({ GIT_CONFIG_GLOBAL: workerGitConfig(directory), GIT_CONFIG_NOSYSTEM: '1' })
+  expect(next.setup.workerEnvironment.PATH?.split(':')[0]).toBe(bin)
+  expect(process.env.PATH?.split(':')).not.toContain(bin)
   await next.stop()
   expect(process.env.GIT_CONFIG_GLOBAL).toBeUndefined()
   expect(process.env.PATH?.split(':')).not.toContain(bin)
@@ -1166,6 +1163,8 @@ it('runs a GitHub-only deployment: the GitHub part of the Policy decides alone, 
   expect(next.health).not.toHaveProperty('sync:feishu')
   const problems = () => overviewOf(next).problems
   const unregister = next.sources.register(githubKind)
+  const local = next.store.settings()
+  next.store.saveSettings({ ...local, sources: { ...local.sources, local: { enabled: false, config: {} } } })
   expect(next.health.github).toEqual({ state: 'starting', detail: '' })
   const policy = next.store.settings().policy
   await next.settings.save('policy', { ...policy, sources: {} }, next.store.blockRevision('policy'), 'panel')
@@ -1791,4 +1790,80 @@ it('keeps the Policy the main Session judges by in its prompt, after admission a
   await runtime.settings.save('policy', { ...saved.policy, rules: rules.map(rule => ({ ...rule, enabled: false })) }, runtime.store.blockRevision('policy'), 'panel')
   expect(policy()).toContain('No rule is enabled: a proactive candidate can only be ignored.')
   expect(policy()).toContain('The accept mode and the rules decide proactive candidates only')
+})
+
+
+it('personal setup leaves normal Desktop processes and ordinary sessions untouched', async () => {
+  const original = { ...process.env }
+  vi.stubEnv('GIT_DIR', '/path/to/operator-repository')
+  vi.stubEnv('SSH_AUTH_SOCK', '/path/to/agent-socket')
+  try {
+    const local = await restart({}, { github: { repository: '', cli: '' }, feishu: null, executor: { identityMode: 'personal' } })
+    await local.ready
+    const environment = local.setup.workerEnvironment
+    expect(environment).toHaveProperty('GIT_DIR', undefined)
+    expect(environment).not.toHaveProperty('PATH')
+    expect(environment).not.toHaveProperty('GIT_CONFIG_GLOBAL')
+    expect(environment).not.toHaveProperty('SSH_AUTH_SOCK')
+    expect(process.env).toEqual({ ...original, GIT_DIR: '/path/to/operator-repository', SSH_AUTH_SOCK: '/path/to/agent-socket' })
+    const context = (local as unknown as { ctx: Context }).ctx
+    for (const id of ['worker-unrelated', 'ordinary-child']) {
+      const agent = { id, session: { header: { parentSession: 'worker-unrelated' } } }
+      context.emit('agent/created', { agent } as never)
+      context.emit('agent/inbox/claimed', { agent, message: { source: { kind: 'user' } } } as never)
+      expect(guards.has(id)).toBe(false)
+      expect(restricts.has(id)).toBe(false)
+    }
+    const executor = local.executor as unknown as { personal: Map<string, string> }
+    expect(executor.personal.has('unrelated')).toBe(false)
+  } finally { vi.unstubAllEnvs() }
+})
+
+it('holds interrupted worker launches and queued Router relays before dispatch, then explicitly resumes both', async () => {
+  const { ticket } = await acceptedTicket()
+  const port = 3082
+  const endpoint = join(directory, 'runtime-endpoint.json')
+  expect(JSON.parse(readFileSync(endpoint, 'utf8'))).toMatchObject({ version: 1, pid: process.pid, instanceId: runtime.instanceId, host: '127.0.0.1', port })
+  expect(statSync(endpoint).mode & 0o777).toBe(0o600)
+  const previous = runtime.instanceId
+  await runtime.settings.pause(true, 'panel')
+  runtime.sessions.relay('held-relay', JSON.stringify({ kind: 'held-proof' }))
+  await runtime.stop()
+  expect(existsSync(endpoint)).toBe(false)
+  const next = await restart({}, { executor: { onRestart: 'pause' } })
+  await next.ready
+  deliveries.mockClear()
+  await next.idle()
+  expect(next.instanceId).not.toBe(previous)
+  expect((await api('GET', 'state')).body).toMatchObject({ paused: true, startupHold: true, startupHoldCount: 1 })
+  expect(next.store.tickets.get(ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+  expect(relays(next.masterId)).toEqual([])
+  expect(await api('POST', 'resume')).toMatchObject({ status: 200, body: { paused: false, startupHold: false } })
+  await next.idle()
+  expect(next.store.tickets.get(ticket.id)?.assignments.at(-1)?.state).toBe('running')
+  expect(relays(next.masterId)).toContainEqual({ kind: 'held-proof' })
+})
+
+it('preserves an operator pause in auto restart mode', async () => {
+  const { ticket } = await acceptedTicket()
+  await runtime.settings.pause(true, 'panel')
+  const next = await restart({}, { executor: { onRestart: 'auto' } })
+  await next.ready
+  expect((await api('GET', 'state')).body).toMatchObject({ paused: true, startupHold: false, startupHoldCount: 0 })
+  expect(next.store.tickets.get(ticket.id)?.assignments.at(-1)?.state).toBe('pending')
+})
+
+
+it('holds the Router before activating a restored DSH inbox', async () => {
+  const master = runtime.masterId
+  const read = vi.fn(async () => ({ values: { inbox: { 'next-turn': [{ source: { kind: 'user' } }], 'next-step': [] } } }))
+  services.sessionController = { ...controller, projections: read }
+  controller.resolveAgent.mockClear()
+  const next = await restart({}, { executor: { onRestart: 'pause' } })
+  await next.ready
+  expect(read).toHaveBeenCalledWith({ sessionId: master }, expect.any(AbortSignal))
+  expect(next.startupHoldCount).toBe(1)
+  expect(controller.resolveAgent).not.toHaveBeenCalledWith(master)
+  expect(await api('POST', 'resume')).toMatchObject({ status: 200, body: { startupHold: false } })
+  expect(controller.resolveAgent).toHaveBeenCalledWith(master)
 })

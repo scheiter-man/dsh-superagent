@@ -93,6 +93,8 @@ export interface PanelServer {
   threads: ThreadRow[]
   threadPages: (key: string, query: { before?: string; around?: string }) => ThreadPageView | undefined
   person: TicketRow[]; search: Pick<ApiResponse<'GET search'>, 'items' | 'threads'>; history: HistoryView
+  startupHoldCount?: number
+  unauthorized?: boolean
   requests: { path: string; method: string; body?: unknown }[]
   /** Requests with undeclared query params or invalid body presence; asserted empty after each test. */
   misuse: string[]
@@ -159,7 +161,7 @@ function sourceStatuses(): SourceStatusRow[] {
 }
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', paused: server.settings.paused,
+  masterId: 'master', instanceId: 'instance', startupHold: !!server.startupHoldCount, startupHoldCount: server.startupHoldCount ?? 0, paused: server.settings.paused,
   // The panel does not read health; the service script does.
   health: {},
 })
@@ -292,6 +294,8 @@ const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
   'GET state': { answer: stateView },
+  'GET health': { answer: () => ({ ok: true, instanceId: 'instance', pid: 1, paused: server.settings.paused, startupHold: false }) },
+  'POST resume': { answer: () => { server.settings.paused = false; server.startupHoldCount = 0; return { paused: false, startupHold: false } } },
   'POST local/submit': { body: true, answer: ({ body }) => ({ request_id: body.request_id, desk: body.desk, ticket_id: 'local-test', trigger_id: 'local-trigger', duplicate: false }) },
   'GET overview': { answer: overviewView },
   'GET search': { query: ['q'], answer: async ({ query }) => {
@@ -441,6 +445,7 @@ export function usePanelServer(cleanup: () => void) {
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })
+      if (server.unauthorized && !new Headers(init?.headers).has('authorization')) return new Reply({ error: 'Unauthorized' }, 401)
       const route = match(method, path.split('/'))
       if (!route) return new Reply({ error: 'Unknown operation' }, 404)
       const answer = await run(route.key, route.params, address.searchParams, body)

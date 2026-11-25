@@ -97,11 +97,24 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
+## Desktop profile
+
+Install a pinned build of the bundle in the Desktop profile. Leave its application-managed loopback listener in place so `--port 0` can select a free port. A minimal plugin row is:
+
+```yaml
+- id: dsh-superagent
+  config:
+    stateDir: !!js dshHomePath('storages/superagent')
+    # Set operatorTokenHash locally if using the CLI or the panel's token fallback.
+```
+
+Authenticated DSH renderer requests use the existing browser session. The Overview panel can create a Local ticket and unlock access with an inline operator token when the browser has no admitted session. With configuration synchronization, keep the state directory and the operator configuration machine-local. `stateDir` accepts POSIX and Windows absolute paths. The service CLI still uses POSIX process and file APIs.
+
 ## Operator authentication
 
-Create a private token file with `scripts/dsh-superagent init-token --output <private-file>`. Set `operatorTokenHash` on the `dsh-superagent` plugin row to the printed SHA-256 value. Restart the dedicated profile to apply the hash. Write operations require the bearer token in addition to the loopback and same-origin checks. The browser asks for the token on its first authenticated change and retains it only in memory. CLI commands prompt on a terminal or accept `--token-file`.
+Create a private token file with `scripts/dsh-superagent init-token --output <private-file>`. Set `operatorTokenHash` on the `dsh-superagent` plugin row to the printed SHA-256 value. Restart the dedicated profile to apply the hash. CLI reads and mutations require the bearer token in addition to the loopback and same-origin checks. The minimal health route is available without a token. The panel uses authenticated DSH browser sessions, or asks for the token inline on HTTP 401 and retains it in memory. CLI commands prompt on a terminal or accept `--token-file`.
 
-Keep this private file out of workspaces and model-readable storage. A file readable by arbitrary programs running as the operator offers no protection against those programs. Prefer storing the token in an operator-only secret manager and entering it at the terminal or UI when needed. Read-only panel requests still use the loopback and same-origin checks. Treat a single-user loopback host as trusted for reads.
+Keep this private file out of workspaces and model-readable storage. A file readable by arbitrary programs running as the operator offers no protection against those programs. Prefer storing the token in an operator-only secret manager and entering it at the terminal or UI when needed. The configured token is also required for sensitive reads from clients without an authenticated DSH session.
 
 ## Start and stop
 
@@ -114,7 +127,7 @@ scripts/dsh-superagent status
 
 `stop` and `restart` request graceful shutdown and wait up to five minutes for Executors. They never force-kill the process or touch other tmux sessions.
 
-`status` prints process ids, health and setup problems. For a different profile or port, use `--profile` and `--url`, or set `DSH_SUPERAGENT_PROFILE` and `DSH_SUPERAGENT_URL`.
+`status` prints process ids, health and setup problems. Use `--profile desktop` or `--state-dir` to discover the port from `runtime-endpoint.json`. `--url` and `DSH_SUPERAGENT_URL` override discovery. Pass `--token-file` to see detailed health and setup information.
 
 `status`, `start` and `restart` exit with one of four codes:
 
@@ -181,7 +194,7 @@ Setup must succeed before polling or work starts. Overview lists missing require
 
 The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to save settings, and the service script reads `GET state`.
 
-Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403. POST and PUT requests also require `Authorization: Bearer <operator-token>`.
+Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403. Sensitive GET, POST and PUT routes require an authenticated DSH request or `Authorization: Bearer <operator-token>`. The discovery route checks the same host and request marker but requires no token. A mutation with a stale `x-orchestrator-instance` returns `409 instance_mismatch`.
 
 Authenticated API saves have the panel's operator permissions, including changes to execution settings and account configuration.
 
@@ -189,6 +202,8 @@ Agents may rely on these routes and fields. The other routes in `src/app/api.ts`
 
 | Request | Answer |
 | --- | --- |
+| `GET health` | Loopback discovery only. Returns `ok`, `instanceId`, `pid`, `paused` and `startupHold`. |
+| `POST resume` | Clears startup hold and manual pause at the operator’s request. |
 | `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
 | `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
@@ -222,10 +237,10 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
+- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository`, `cli` and `pollNotifications` (off by default), and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `model`, `permissionPreset`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+- `executor`: `model`, `identityMode`, `onRestart`, `permissionPreset`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
@@ -241,14 +256,11 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H @"$private_headers_file" -H 'co
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+With `identityMode: personal` (the default), plugin-launched commands inherit the normal OS account configuration and remove inherited repository-location variables. GitHub identity and push access are checked when the Source has an account/repository configuration. Account notification polling is opt-in, independently of the repository stream switches.
 
-The process environment that setup writes:
+With `identityMode: isolated-bot`, Setup creates CLI shims and an isolated Git configuration under `stateDir`. The plugin applies those overrides to its own commands and worktree preparation. Generic DSH tool shells use the profile's normal environment. Use a dedicated OS account when bot credentials must be an enforcement boundary. Neither identity mode rewrites the DSH host environment.
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
-- **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
-
-A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.
+The `onRestart` setting defaults to `pause`. On startup with unfinished work, Superagent holds dispatch and Router relays until an operator resumes. `auto` skips this startup hold and preserves any manual pause.
 
 ## Try it
 
