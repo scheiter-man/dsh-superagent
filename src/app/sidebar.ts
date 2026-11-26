@@ -14,7 +14,7 @@ export function sidebarView(host: HttpHost) {
   const projects = (host.projects?.list() ?? []).map(project => ({ id: project.id, name: project.name,
     masterId: host.masterIdOf?.(project.id) ?? host.masterId, repositoryRoot: project.repositoryRoot,
     worktreeRoot: project.worktreeRoot || (project.revision ? host.projects?.worktreeRoot(project.id) ?? '' : ''),
-    desks: project.desks, active: 0, running: 0, waiting: 0, archived: project.archived,
+    desks: project.desks, active: 0, running: 0, waiting: 0, failed: 0, archived: project.archived,
     routerWorkspace: host.routerWorkspace?.(project.id) ?? null }))
   const byId = new Map(projects.map(project => [project.id, project]))
   for (const ticket of host.store.tickets.list()) {
@@ -22,12 +22,12 @@ export function sidebarView(host: HttpHost) {
     if (!project) continue
     const step = ticketStage(ticket)
     const running = !ticket.ended && (host.executor.isRunning?.(ticket) ?? (step.stage === 'working' && step.action !== 'queued'))
-    const failed = step.stage === 'person' && (step.action === 'failed' || step.action === 'blocked' || step.action === 'delivery')
-    const waiting = step.stage === 'person'
+    const waiting = !ticket.ended && step.stage === 'person'
+    const failed = waiting && (step.action === 'failed' || step.action === 'blocked' || step.action === 'delivery')
     if (!ticket.ended) { totals.open++; project.active++ }
     if (waiting) { totals.waiting++; project.waiting++ }
     if (running) { totals.running++; project.running++ }
-    if (failed) totals.failed++
+    if (failed) { totals.failed++; project.failed++ }
     sessions[workerSessionId(ticket.id)] = { kind: 'worker', projectId: project.id, projectName: project.name,
       ticketId: ticket.id, ticketTitle: ticket.title, desk: ticket.desk || (typeof ticket.mandate.basis.scope?.desk === 'string' ? ticket.mandate.basis.scope.desk : ''),
       status: ticket.ended ? 'done' : failed ? 'failed' : waiting ? 'waiting' : running ? 'running' : step.stage === 'working' ? 'queued' : 'idle',

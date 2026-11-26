@@ -35,6 +35,9 @@
     "client": {
       "platform": "web",
       "inject": [
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-context-menu",
+        "@deepseek-ai/dsh-client-ui-slots",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-renderer",
@@ -62,6 +65,8 @@
     "zod": "4.4.3"
   },
   "peerDependencies": {
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-client-ui-context-menu": "0.2.2-rc.5",
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.5",
     "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.5",
@@ -90,6 +95,7 @@
     "@deepseek-ai/cordis": "4.1.0",
     "@deepseek-ai/dsh-agent": "0.2.2-rc.5",
     "@deepseek-ai/dsh-api-session-controller": "0.2.2-rc.5",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.2-rc.5",
     "@deepseek-ai/dsh-attachment": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-locale": "0.2.2-rc.5",
     "@deepseek-ai/dsh-client-ui-context-menu": "0.2.2-rc.5",

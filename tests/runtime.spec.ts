@@ -1944,4 +1944,9 @@ it('serves authenticated sidebar counts and native session ownership without ope
   expect(Object.values((index.body as { sessions: Record<string, unknown> }).sessions)).toContainEqual(expect.objectContaining({ kind: 'worker' }))
   expect(controller.resolveAgent).not.toHaveBeenCalled()
   expect((await api('GET', '/api/dsh-superagent/sidebar', undefined, '')).status).toBe(401)
+  const ticket = runtime.store.tickets.list()[0]!
+  await runTool(`worker-${ticket.id}`, 'orchestrator_report', { state: 'blocked', summary: 'Awaiting access' })
+  expect((await api('GET', '/api/dsh-superagent/sidebar')).body).toMatchObject({ totals: { failed: 1, waiting: 1 }, projects: [{ failed: 1 }] })
+  expect((await api('POST', `tickets/${ticket.id}/stop`)).status).toBe(200)
+  expect((await api('GET', '/api/dsh-superagent/sidebar')).body).toMatchObject({ totals: { failed: 0, waiting: 0 }, projects: [{ failed: 0 }] })
 })

@@ -380,6 +380,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/client/sidebar-sections.tsx` | Project list portal and Workspace DOM adapter using the official Workspace store |
 | `src/client/sidebar-store.ts`, `src/client/sidebar.tsx`, `src/client/sidebar.css` | Native Workspace menu, row decorations and plugin-lifetime index polling |
 | `src/client/panel-bridge.ts` | One-shot intents between native Workspace and the management panel |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
@@ -448,6 +449,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
 | `tests/service-script.spec.ts` | `scripts/dsh-superagent` against fake `ps`, `tmux` and `dsh` |
+| `tests/sidebar-sections.spec.tsx` | Project section, native collapse with search, workspace-ID badges, actions and teardown |
 | `tests/client.spec.tsx`, `tests/navigation.spec.ts`, `tests/controls.spec.tsx` | The client plugin's registration and polling, Session navigation and route memory, the local controls, and the panel's imports, which have no cycle |
 | `tests/panel-overview.spec.tsx`, `panel-source.spec.tsx`, `panel-trigger.spec.tsx`, `panel-eval.spec.tsx`, `panel-execution.spec.tsx` | Each page of the panel, against a fake management API answered by route |
 | `tests/panel-settings.spec.tsx`, `panel-prompts.spec.tsx`, `panel-deployment.spec.tsx`, `panel-panel.spec.tsx` | The settings groups, drafts and history, the prompts, the Deployment page, and the panel's search, glossary and route memory |

@@ -5,21 +5,29 @@ import type { T } from './text.ts'
 import styles from './sidebar.css?raw'
 
 export const MENU_ICON = 'dsh-superagent.project'
-const normal = (path: string) => {
+export const workspacePath = (path: string) => {
   const value = path.replace(/\\/g, '/').replace(/\/+$/, '')
   return /^[a-z]:|^\/\//i.test(value) ? value.toLowerCase() : value
 }
+export function workspaceProject(snapshot: SidebarView | undefined, path: string) {
+  const cwd = workspacePath(path)
+  const projects = snapshot?.projects.filter(project => !project.archived) ?? []
+  const project = projects.find(item => item.repositoryRoot && workspacePath(item.repositoryRoot) === cwd)
+  if (project) return { project, kind: 'project' as const }
+  const worktree = projects.filter(item => item.worktreeRoot && cwd.startsWith(`${workspacePath(item.worktreeRoot)}/`))
+    .sort((a, b) => workspacePath(b.worktreeRoot).length - workspacePath(a.worktreeRoot).length)[0]
+  return worktree ? { project: worktree, kind: 'worktree' as const } : undefined
+}
+
 export function workspaceActions(snapshot: SidebarView | undefined, path: string, name: string, bridge: PanelBridge,
   openRouter: (id: string) => Promise<void>, t: T) {
-  const cwd = normal(path)
   const open = (id: string) => ({ id: 'router', label: t('sideOpenRouter'), icon: { key: MENU_ICON }, run: () => openRouter(id) })
   const board = (id: string) => ({ id: 'board', label: t('sideOpenProject'), icon: { key: MENU_ICON }, run: () => bridge.openProject(id) })
-  const projects = snapshot?.projects.filter(project => !project.archived) ?? []
-  const project = projects.find(project => project.repositoryRoot && normal(project.repositoryRoot) === cwd)
-  if (project) return [open(project.id), board(project.id), { id: 'new', label: t('sideNewTicket'), icon: { key: MENU_ICON }, run: () => bridge.newTicket(project.id) }]
-  const worktree = projects.filter(project => project.worktreeRoot && cwd.startsWith(`${normal(project.worktreeRoot)}/`))
-    .sort((a, b) => normal(b.worktreeRoot).length - normal(a.worktreeRoot).length)[0]
-  return worktree ? [board(worktree.id), open(worktree.id)] : [{ id: 'register', label: t('sideRegisterWorkspace'), icon: { key: MENU_ICON }, run: () => bridge.registerWorkspace(path, name) }]
+  const match = workspaceProject(snapshot, path)
+  if (!match) return [{ id: 'register', label: t('sideRegisterWorkspace'), icon: { key: MENU_ICON }, run: () => bridge.registerWorkspace(path, name) }]
+  const { kind, project: { id } } = match
+  return kind === 'project' ? [open(id), board(id), { id: 'new', label: t('sideNewTicket'), icon: { key: MENU_ICON }, run: () => bridge.newTicket(id) }]
+    : [board(id), open(id)]
 }
 export function SidebarGlyph({ worker = false, size = 14 }: { worker?: boolean; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

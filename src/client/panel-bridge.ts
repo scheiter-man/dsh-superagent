@@ -23,7 +23,7 @@ export function panelBridge(select: () => void) {
     select()
     listeners.forEach(listener => listener())
   }
-  return { take, subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
+  return { take, openPanel: select, subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
     openProject: (projectId: string) => send({ kind: 'project', projectId }),
     newTicket: (projectId: string) => send({ kind: 'new', projectId }),
     openTicket: (projectId: string, ticketId: string) => send({ kind: 'ticket', projectId, ticketId }),

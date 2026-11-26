@@ -14,6 +14,8 @@ Plugin configuration holds the state directory and machine limits. Use the panel
 
 In DSH 0.2.2-rc.5, enable the bundle in the Desktop Profile and register each repository through the Workspace menu or Superagent → Settings → Projects. Choose a project ID, worktree root and the desks that accept local Tickets. A new Router is anchored in that repository. An empty idle legacy Router can move to a new Session in the repository Workspace. Any earlier history remains in its original Session.
 
+The Superagent Projects section lists every active project, including Routers with blank Sessions. The native Workspaces list can be collapsed independently and opens while searching. Repository and worktree badges follow the Workspace catalog by ID.
+
 Use the native Workspace menu to open the project Router, board or Ticket composer. Session rows open the matching board or Ticket and surface state in their badges and hover cards. The panel icon shows a dot for waiting or running work. `GET /api/dsh-superagent/sidebar` provides the read-only project/Session index using the same DSH admission or operator Bearer authentication as the panel.
 
 From an existing checkout, run `sa submit --desk dev --title "Review the change" --file request.md`. Intake identifies the registered project from the Git checkout, including linked worktrees. Use `--project <id>` to choose one explicitly. The local service CLI discovers the endpoint from the current Profile state, or from `--state-dir` when the storage is relocated.

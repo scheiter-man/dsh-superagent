@@ -16,6 +16,7 @@ import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
 import { panelBridge, type PanelBridge } from './panel-bridge.ts'
+import { mountSidebarSections } from './sidebar-sections.tsx'
 import { sidebarStore, type SidebarStore } from './sidebar-store.ts'
 import { MENU_ICON, SidebarGlyph, SidebarIcon, SidebarRow, workspaceActions } from './sidebar.tsx'
 import type { T } from './text.ts'
@@ -51,11 +52,17 @@ export function apply(ctx: ClientContext): void {
   const sidebar = sidebarStore()
   ctx.effect(() => sidebar.dispose)
   const bridge = panelBridge(() => ctx.get('layout')?.selectPanel(PANEL_ID))
+  const openSession = (id: string, signal: AbortSignal) => openKnownSession(ctx.sessions, id as SessionId, target => ctx.uiWorkspace.openSession(target), signal)
   const openRouter = async (id: string) => {
     const { masterId } = await sidebar.openRouter(id)
-    await openKnownSession(ctx.sessions, masterId as SessionId, target => ctx.uiWorkspace.openSession(target), new AbortController().signal)
+    await openSession(masterId, AbortSignal.timeout(8000))
     void sidebar.refresh()
   }
+  ctx.inject(['layout'], child => {
+    if (child.get('workspaces')) {
+      child.inject(['workspaces'], scope => scope.effect(() => mountSidebarSections({ store: sidebar, bridge, openRouter, openSession, t, workspaces: scope.workspaces.list })))
+    } else child.effect(() => mountSidebarSections({ store: sidebar, bridge, openRouter, openSession, t }))
+  })
   ctx.inject(['contextMenus', 'layout'], child => {
     child.slots.inject('contextMenu.icon', () => child.slots.register({ name: 'contextMenu.icon', key: MENU_ICON }, () => <SidebarGlyph />))
     child.effect(() => child.contextMenus.register({ id: MENU_ICON, target: 'workspace', order: 250,

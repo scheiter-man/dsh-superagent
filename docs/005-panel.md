@@ -45,6 +45,8 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
 
 DSH 0.2.2-rc.5 shows Superagent alongside ordinary Workspaces and Sessions. Each registered repository has a project Router. Right-click the repository Workspace or use its **…** menu to open the Router, open the project board, or start a Ticket with that project selected. A Workspace under a project's worktree root can open the owning board or Router. An unregistered Workspace can open the Projects form with its directory and name already filled in.
 
+The collapsible **Superagent Projects** section above the native tree includes projects with no Tickets and Routers whose first message has yet to be sent. Expand a project to open its Router or an active Ticket. The native **Workspaces** section has its own collapse control and reopens while search is active. Registered repositories and their linked worktrees carry a Superagent icon and active Ticket count, with failed work taking priority in the status color.
+
 Router rows show their active Ticket count and highlight waiting work. Worker rows show the desk and color-coded state. The native hover card adds the project, state, and branch. The Session row action and **…** menu open the corresponding board or Ticket. The Superagent entry uses a warning dot for waiting work and a running dot for active execution.
 
 A Router with conversation history keeps its existing Session and directory. Settings → Projects shows the actual Router directory when it differs from the repository. A new Router or an empty idle legacy Router uses the repository Workspace.
