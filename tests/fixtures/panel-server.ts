@@ -294,6 +294,7 @@ const ticketOf = (id: string) =>
 const SourceSave = z.object({ enabled: z.boolean(), config: z.unknown() })
 
 const ROUTES: { [K in keyof Api]: Route<K> } = {
+  'GET sidebar': { answer: () => ({ totals: { open: 0, running: 0, waiting: 0, failed: 0 }, projects: [], sessions: {} }) },
   'GET state': { answer: stateView },
   'GET projects': { answer: () => server.projects ?? { defaultId: '', items: [], workspaces: [] } },
   'PUT projects/:id': { body: true, answer: ({ body }) => ({ ...body.project, revision: 1 }) },
@@ -445,7 +446,7 @@ export function usePanelServer(cleanup: () => void) {
     vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit): Promise<Response> => {
       if (server.down) return new Response(null, { status: 404 })
       const address = new URL(url, 'http://127.0.0.1:3082')
-      const path = address.pathname.replace('/orchestrator/api/', '')
+      const path = address.pathname.replace('/orchestrator/api/', '').replace('/api/dsh-superagent/sidebar', 'sidebar')
       const method = init?.method ?? 'GET'
       const body: unknown = init?.body ? JSON.parse(String(init.body)) : undefined
       server.requests.push({ path: decodeURIComponent(`${path}${address.search}`), method, ...body === undefined ? {} : { body } })

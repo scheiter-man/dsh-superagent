@@ -1,3 +1,4 @@
+import { sidebarView } from './sidebar.ts'
 import { ProjectError, ProjectInput, Projects } from './projects.ts'
 /** Loopback-only management HTTP routes with same-origin enforcement for the web panel. */
 import type { Context } from '@deepseek-ai/cordis'
@@ -36,6 +37,7 @@ export interface HttpHost {
   readonly projects?: Projects
   promptsOf?(id: string): HttpHost['prompts']
   masterIdOf?(id: string): string
+  routerWorkspace?(id: string): { cwd: string; preserved: boolean } | undefined
   openMaster?(id: string): Promise<string>
   workspaces?(): { id: string; title: string; path: string }[]
   /** Feishu message links resolved since startup, used by search to match AppLink URLs. */
@@ -45,7 +47,7 @@ export interface HttpHost {
   readonly sessions: Pick<Sessions, 'status' | 'notify' | 'delivery'>
   readonly settings: Pick<Settings, 'view' | 'save' | 'pause' | 'sync' | 'refreshLabels'>
   readonly engine: EngineForPeople
-  readonly executor: Pick<DshExecutor, 'activeCount'>
+  readonly executor: Pick<DshExecutor, 'activeCount'> & Partial<Pick<DshExecutor, 'isRunning'>>
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
@@ -187,6 +189,7 @@ function routes(runtime: HttpHost): Routes {
   const ticket = (id: string) => { if (!store.tickets.get(id)) throw new RouteError(404, 'Ticket not found'); return id }
   const promptBody = (input: { body: (maxBytes?: number) => Promise<unknown> }) => input.body(4 * runtime.machine.promptMaxChars.get() + 4096)
   return {
+    'GET sidebar': () => sidebarView(runtime),
     'GET health': () => ({ ok: true, instanceId: runtime.instanceId, pid: process.pid, paused: runtime.store.settings().paused, startupHold: runtime.startupHold }),
     'GET state': () => stateView(runtime),
     'POST resume': () => runtime.resumeProcessing(),
@@ -197,7 +200,7 @@ function routes(runtime: HttpHost): Routes {
       return receipt
     },
     'GET projects': () => ({ defaultId: projects.defaultId, workspaces: runtime.workspaces?.() ?? [], items: projects.list().map(project => ({ ...project,
-      masterId: runtime.masterIdOf?.(project.id) ?? runtime.masterId, active: store.tickets.open().filter(ticket => projects.scope(ticket) === project.id).length })) }),
+      masterId: runtime.masterIdOf?.(project.id) ?? runtime.masterId, ...(runtime.routerWorkspace?.(project.id) ? { routerWorkspace: runtime.routerWorkspace(project.id)! } : {}), active: store.tickets.open().filter(ticket => projects.scope(ticket) === project.id).length })) }),
     'PUT projects/:id': async ({ params, body }) => {
       const { project, revision, makeDefault, adoptLegacy } = z.object({ project: ProjectInput, revision: count, makeDefault: z.boolean().optional(), adoptLegacy: z.boolean().optional() }).parse(await body())
       if (project.id !== params.id) throw new RouteError(400, 'Project ID does not match the route')
@@ -289,16 +292,17 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => Promise<voi
   const connection = () => ctx.get?.('connection') as { requestRejection?(request: IncomingMessage): number | undefined } | undefined
   const serve = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     const url = new URL(req.url ?? '/', 'http://localhost')
-    if (!url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
+    const sidebar = url.pathname === '/api/dsh-superagent/sidebar'
+    if (!sidebar && !url.pathname.startsWith('/orchestrator/api/')) { res.writeHead(404); res.end(); return }
     const port = ctx.webServer.port
     if (port === undefined || !sameOrigin(req, port)) { json(res, 403, { error: 'Same-origin management request required' }); return }
     const method = req.method ?? 'GET'
-    const path = url.pathname.slice('/orchestrator/api/'.length)
+    const path = sidebar ? 'sidebar' : url.pathname.slice('/orchestrator/api/'.length)
     const discovery = method === 'GET' && path === 'health'
     const hash = runtime.machine?.operatorTokenHash
     const browser = connection()
     if (!discovery && !authorized(req.headers.authorization, hash) &&
-      !(typeof browser?.requestRejection === 'function' && browser.requestRejection(req) === undefined) && !(method === 'GET' && !hash && !browser)) {
+      !(typeof browser?.requestRejection === 'function' && browser.requestRejection(req) === undefined) && !(method === 'GET' && path !== 'sidebar' && !hash && !browser)) {
       json(res, 401, { error: 'Authenticate in DSH or enter the Superagent operator token' }); return
     }
     const instance = req.headers['x-orchestrator-instance']
@@ -315,13 +319,16 @@ export function registerHttp(ctx: Context, runtime: HttpHost): () => Promise<voi
       json(res, 200, await route.run({ params: route.params as never, query: Object.fromEntries(url.searchParams), body }))
     } catch (error) { if (!res.destroyed) json(res, ...failure(error)) }
   }
-  const unregister = ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler: (req, res) => {
+  const handler = (req: IncomingMessage, res: ServerResponse) => {
     const pending = serve(req, res).finally(() => { active.delete(req) })
     active.set(req, pending)
     return pending
-  } })
+  }
+  const unregister = ctx.webServer.register({ kind: 'prefix', path: '/orchestrator', handler })
+  const unregisterSidebar = ctx.webServer.register({ kind: 'exact', path: '/api/dsh-superagent/sidebar', handler })
   return async () => {
     unregister()
+    unregisterSidebar()
     for (const req of active.keys()) if (req.complete === false) req.destroy()
     await Promise.allSettled(active.values())
   }

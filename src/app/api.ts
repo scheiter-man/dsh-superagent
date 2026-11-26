@@ -1,3 +1,4 @@
+import type { SidebarView } from './sidebar.ts'
 import type { ProjectInput, Project } from './projects.ts'
 import type { LocalSubmission, submitLocal } from './local-intake.ts'
 /** Type-only management API contract between the web panel and host routes, imported by the panel without bundling host code. */
@@ -20,11 +21,12 @@ interface Paged { offset?: number; limit?: number }
 type Delivery = 'injected' | 'pending'
 
 export interface Api {
+  'GET sidebar': { response: SidebarView }
   'GET health': { response: { ok: boolean; instanceId: string; pid: number; paused: boolean; startupHold: boolean } }
   'POST resume': { response: { paused: boolean; startupHold: boolean } }
   'GET state': { response: StateView }
   'POST local/submit': { body: LocalSubmission; response: ReturnType<typeof submitLocal> }
-  'GET projects': { response: { defaultId: string; items: (Project & { masterId: string; active: number })[]; workspaces: { id: string; title: string; path: string }[] } }
+  'GET projects': { response: { defaultId: string; items: (Project & { masterId: string; active: number; routerWorkspace?: { cwd: string; preserved: boolean } })[]; workspaces: { id: string; title: string; path: string }[] } }
   'PUT projects/:id': { body: { project: ProjectInput; revision: number; makeDefault?: boolean; adoptLegacy?: boolean }; response: Project }
   'POST projects/:id/router': { response: { masterId: string } }
   'GET overview': { query?: { project?: string }; response: OverviewView }

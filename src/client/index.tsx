@@ -1,8 +1,9 @@
+import type {} from '@deepseek-ai/dsh-client-ui-context-menu/client'
+import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 /** Browser plugin entry point registering the sidebar icon, main management panel, and Plugin Manager config view. */
 import { useCallback, useEffect, useRef } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
-import type { SidebarPanelIconOwnerProps } from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
@@ -14,6 +15,9 @@ import { openKnownSession, SessionNavigationError } from '../navigation.ts'
 import { App } from './app.tsx'
 import { PluginConfig, usePageForm } from './deployment.tsx'
 import { en, zh } from './locales.ts'
+import { panelBridge, type PanelBridge } from './panel-bridge.ts'
+import { sidebarStore, type SidebarStore } from './sidebar-store.ts'
+import { MENU_ICON, SidebarGlyph, SidebarIcon, SidebarRow, workspaceActions } from './sidebar.tsx'
 import type { T } from './text.ts'
 
 type ClientContext = Context & { sessions: ISessions }
@@ -21,14 +25,8 @@ const NS = 'dshSuperagent'
 const PANEL_ID = 'dsh-superagent' as MainPanelId
 const ENTRY = 'dsh-superagent'
 
-function HammerIcon({ size }: SidebarPanelIconOwnerProps) {
-  return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-    <path d="M6 3.5h9l3.5 1.75v2.5L15 9.5H6a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1z" /><path d="M10 9.5v10.25a1.75 1.75 0 0 0 3.5 0V9.5" /><path d="M10 15.5h3.5" />
-  </svg>
-}
-
 /** Mounted panel wrapper; cancels any pending Session navigation when a new one starts or the panel unmounts. */
-function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
+function Mounted({ ctx, t, bridge, sidebar }: { ctx: ClientContext; t: T; bridge: PanelBridge; sidebar: SidebarStore }) {
   const pending = useRef<AbortController>(undefined)
   useEffect(() => () => { pending.current?.abort() }, [])
   const openSession = useCallback(async (id: string) => {
@@ -42,7 +40,7 @@ function Mounted({ ctx, t }: { ctx: ClientContext; t: T }) {
     }
   }, [ctx, t])
   const form = usePageForm(ctx.get('configForms')?.get<Record<string, unknown>>(ENTRY))
-  return <App t={t} openSession={openSession} deploymentForm={form} />
+  return <App t={t} openSession={openSession} deploymentForm={form} bridge={bridge} sidebar={sidebar} />
 }
 
 export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
@@ -50,9 +48,34 @@ export const inject = ['slots', 'locale', 'sessions', 'uiWorkspace']
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-superagent: dictionaries')
   const t = ctx.locale.bind(NS)
+  const sidebar = sidebarStore()
+  ctx.effect(() => sidebar.dispose)
+  const bridge = panelBridge(() => ctx.get('layout')?.selectPanel(PANEL_ID))
+  const openRouter = async (id: string) => {
+    const { masterId } = await sidebar.openRouter(id)
+    await openKnownSession(ctx.sessions, masterId as SessionId, target => ctx.uiWorkspace.openSession(target), new AbortController().signal)
+    void sidebar.refresh()
+  }
+  ctx.inject(['contextMenus', 'layout'], child => {
+    child.slots.inject('contextMenu.icon', () => child.slots.register({ name: 'contextMenu.icon', key: MENU_ICON }, () => <SidebarGlyph />))
+    child.effect(() => child.contextMenus.register({ id: MENU_ICON, target: 'workspace', order: 250,
+      observe: () => [sidebar], resolve: ({ path, displayTitle }) => workspaceActions(sidebar.getSnapshot(), path, displayTitle, bridge, openRouter, t) }))
+  })
+  const ambient = ['sidebar.session.row.leading', 'sidebar.session.row.trailing', 'sidebar.session.row.hover'] as const
+  for (const [index, name] of ambient.entries()) ctx.slots.inject(name, () => ctx.slots.register({ name, id: ENTRY, order: 350 },
+    ({ sessionId }: { sessionId: string }) => <SidebarRow sessionId={sessionId} store={sidebar} bridge={bridge} t={t} place={(['leading', 'trailing', 'hover'] as const)[index]!} />))
+  ctx.inject(['layout'], child => {
+    child.slots.inject('sidebar.workspaces.session.row.action', () => child.slots.register({ name: 'sidebar.workspaces.session.row.action', id: ENTRY, order: 350 },
+      ({ sessionId }: { sessionId: string }) => <SidebarRow sessionId={sessionId} store={sidebar} bridge={bridge} t={t} place="action" />))
+    child.slots.inject('sidebar.workspaces.session.menu.item', () => child.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: ENTRY, order: 350 },
+      ({ sessionId, useMenuOpenState }: { sessionId: string; useMenuOpenState: () => readonly [boolean, (open: boolean) => void] }) => {
+        const [, setOpen] = useMenuOpenState()
+        return <SidebarRow sessionId={sessionId} store={sidebar} bridge={bridge} t={t} place="menu" dismiss={() => setOpen(false)} />
+      }))
+  })
   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, locale: NS, inject: () => ({}) },
-    (props: { t: T }) => <Mounted ctx={ctx} t={props.t} />))
-  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, HammerIcon))
+    (props: { t: T }) => <Mounted ctx={ctx} t={props.t} bridge={bridge} sidebar={sidebar} />))
+  ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, order: 10, label: () => t('panel'), locale: NS }, ({ size }: SidebarPanelIconOwnerProps) => <SidebarIcon store={sidebar} size={size} />))
   ctx.slots.inject('plugins.row.config', () => ctx.slots.register({ name: 'plugins.row.config', key: `${ENTRY}#${ENTRY}`, locale: NS },
     (props: PluginConfigViewProps & { t: T }) => <PluginConfig t={props.t} view={props.view} form={props.form} />))
 }

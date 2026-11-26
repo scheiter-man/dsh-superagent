@@ -94,11 +94,12 @@ export class Projects {
     if (matches.length === 1) return matches[0]!
     throw new ProjectError(`Choose --project ${options.map(project => project.id).join('|')}`)
   }
+  worktreeRoot(id: string): string { return this.get(id).worktreeRoot || join(this.stateDir, 'worktrees', id) }
   plan(id: string, ticketId: string, name: string): NonNullable<Ticket['execution']>['plan'] {
     const project = this.get(id)
     if (project.archived) throw new ProjectError('Project is archived')
     if (!project.revision) return undefined
-    return { projectId: id, root: plannedRoot(project.worktreeRoot || join(this.stateDir, 'worktrees', id)), mode: project.prepareMode,
+    return { projectId: id, root: plannedRoot(this.worktreeRoot(id)), mode: project.prepareMode,
       prepare: project.prepare, repository: project.repositoryRoot, identity: project.repositoryIdentity ?? '',
       ...(project.prepareMode === 'git' ? { baseline: projectGit(project.repositoryRoot, 'rev-parse', '--verify', 'HEAD^{commit}'), branch: `task/${name}-${key(ticketId)}` } : {}) }
   }

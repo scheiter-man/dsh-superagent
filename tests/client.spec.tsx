@@ -12,21 +12,26 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true
 
 type Entry = { options: { name: string; id?: string; key?: string; order?: number; locale?: string; label?: () => string }; component: ComponentType<Record<string, unknown>> }
 const t = ((key: keyof typeof zh) => zh[key] ?? key) as never
-function fixture(listed: string[]) {
+function fixture(listed: string[], native = false) {
   const entries: Entry[] = []
+  const dispose: (() => void)[] = []
+  const menus: unknown[] = []
+  const selectPanel = vi.fn()
   const dictionaries: Record<string, unknown> = {}
   const ctx = {
     slots: { inject: (_name: string, register: () => void) => register(), register: (options: Entry['options'], component: Entry['component']) => { entries.push({ options, component }); return () => {} } },
     locale: { register: (ns: string, value: unknown) => { dictionaries[ns] = value; return () => {} }, bind: () => t },
-    effect: (effect: () => unknown) => { effect() },
+    effect: (effect: () => unknown) => { const cleanup = effect(); if (typeof cleanup === 'function') dispose.push(cleanup as () => void) },
+    inject: (names: string[], register: (ctx: unknown) => void) => { if (native) register(ctx); return names },
+    contextMenus: { register: (entry: unknown) => { menus.push(entry); return () => {} } },
     sessions: { list: { getSnapshot: () => ({ phase: 'ready', byId: Object.fromEntries(listed.map(id => [id, {}])) }) }, refresh: vi.fn(async () => {}) },
     uiWorkspace: { openSession: vi.fn() },
     // Omit config form service so Deployment renders read-only.
-    get: () => undefined,
+    get: (key: string) => native && key === 'layout' ? { selectPanel } : undefined,
   }
   apply(ctx as never)
   const entry = (name: string) => entries.find(item => item.options.name === name)!
-  return { ctx, entries, dictionaries, main: entry('main'), nav: entry('sidebar.panellist') }
+  return { ctx, entries, dictionaries, menus, selectPanel, dispose: () => dispose.forEach(fn => fn()), main: entry('main'), nav: entry('sidebar.panellist') }
 }
 async function render(entry: Entry, props: Record<string, unknown>) {
   const container = document.createElement('div'); document.body.append(container)
@@ -40,8 +45,16 @@ const openMaster = async (container: HTMLElement) => {
   await act(async () => { button.click() })
   for (let i = 0; i < 5; i++) await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
 }
-const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+const fixtureProjects = [{ id: 'alpha', name: 'Alpha', masterId: 'router-alpha', repositoryRoot: 'C:\\Dev\\Alpha', worktreeRoot: 'C:\\Work',
+  desks: ['review'], active: 2, running: 1, waiting: 1, archived: false, revision: 1, prepareMode: 'git', prepare: '' }]
+const serve = (native = false) => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
   const path = new URL(url, 'http://127.0.0.1').pathname.replace('/orchestrator/api/', '')
+  if (native && path === '/api/dsh-superagent/sidebar') return Response.json({ projects: fixtureProjects, totals: { open: 2, running: 1, waiting: 1, failed: 0 }, sessions: {
+    'router-alpha': { kind: 'router', projectId: 'alpha', projectName: 'Alpha', active: 2, running: 1, waiting: 1, desks: ['review'] },
+    'worker-fixture': { kind: 'worker', projectId: 'alpha', projectName: 'Alpha', ticketId: 'fixture', ticketTitle: 'Fix sample', desk: 'review', status: 'running', branch: 'task/review' },
+  } })
+  if (native && path === 'projects') return Response.json({ defaultId: 'alpha', items: fixtureProjects, workspaces: [] })
+  if (native && path === 'projects/alpha/router') return Response.json({ masterId: 'router-alpha' })
   if (path === 'overview') return Response.json({ problems: [], person: [], executor: { running: 0, queued: 0, maxWorkers: 3, idle: 0 }, flow: { triggers: 0, filtered: 0, judged: 0, accepted: 0, evaluating: 0 }, policyVersion: 'v' })
   if (path === 'state') return Response.json({ masterId: 'master', settings: SettingsSchema.parse({}), revisions: { policy: 0, eval: 0, executor: 0 }, sources: [], policy_version: 'v', health: {}, outgoing: [], load: { running: 0, queued: 0 },
     setup: { machine: { stateDir: '/srv/state', worktreeRoot: '/srv/state/worktrees', blockedCommands: [], promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 }, problem: null, feishuProblem: null, accounts: null } })
@@ -50,32 +63,33 @@ const serve = () => vi.stubGlobal('fetch', vi.fn(async (url: string) => {
 afterEach(() => { vi.unstubAllGlobals() })
 
 it('registers a localized main panel, sidebar entry and Plugin Manager row page, and no settings section', () => {
-  const { entries, dictionaries, main, nav } = fixture([])
-  expect(entries.map(entry => entry.options.name)).toEqual(['main', 'sidebar.panellist', 'plugins.row.config'])
-  expect(entries[2]!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
+  const { entries, dictionaries, main, nav, dispose } = fixture([])
+  expect(entries.map(entry => entry.options.name)).toEqual(['sidebar.session.row.leading', 'sidebar.session.row.trailing', 'sidebar.session.row.hover', 'main', 'sidebar.panellist', 'plugins.row.config'])
+  expect(entries.find(item => item.options.name === 'plugins.row.config')!.options).toMatchObject({ key: 'dsh-superagent#dsh-superagent', locale: 'dshSuperagent' })
   expect(Object.keys(dictionaries)).toEqual(['dshSuperagent'])
   expect(main.options).toMatchObject({ key: 'dsh-superagent', locale: 'dshSuperagent' })
   expect(nav.options).toMatchObject({ id: 'dsh-superagent', order: 10, locale: 'dshSuperagent' })
   expect(nav.options.label?.()).toBe('Superagent')
+  dispose()
 })
 
 it('opens a listed Session through the workspace from the main panel', async () => {
   serve()
-  const { ctx, main } = fixture(['master'])
+  const { ctx, main, dispose } = fixture(['master'])
   const view = await render(main, { t })
   await openMaster(view.container)
   expect(ctx.uiWorkspace.openSession).toHaveBeenCalledExactlyOnceWith('master')
-  view.dispose()
+  view.dispose(); dispose()
 })
 
 it('reports a Session missing from the catalog in the interface language', async () => {
   serve()
-  const { ctx, main } = fixture([])
+  const { ctx, main, dispose } = fixture([])
   const view = await render(main, { t })
   await openMaster(view.container)
   expect(ctx.uiWorkspace.openSession).not.toHaveBeenCalled()
   expect(document.body.textContent).toContain(zh.sessionNotListed)
-  view.dispose()
+  view.dispose(); dispose()
 })
 
 it('polls one request at a time, keeps the data while new dependencies load, and polls less while hidden', async () => {
@@ -142,4 +156,45 @@ it('tells a dsh-superagent that does not answer from a record it does not have, 
     status: 400, missing: false, unreachable: false })
   expect(await failure(async () => Response.json({ error: 'Unknown ticket', code: 'unknownTicket' }, { status: 404 }))).toEqual({
     message: 'user unknownTicket', status: 404, missing: true, unreachable: false })
+})
+
+
+it('renders the five native Session entries and routes Workspace actions into the panel', async () => {
+  serve(true)
+  const host = fixture(['router-alpha'], true)
+  const at = (name: string) => host.entries.find(entry => entry.options.name === name)!
+  const views = []
+  try {
+    const glyph = await render(at('sidebar.session.row.leading'), { sessionId: 'router-alpha' }); views.push(glyph)
+    expect(glyph.container.querySelector('svg')).toBeTruthy()
+    const badge = await render(at('sidebar.session.row.trailing'), { sessionId: 'router-alpha' }); views.push(badge)
+    expect(badge.container.textContent).toContain('总控 · 2')
+    expect(badge.container.querySelector('[data-state="waiting"]')).toBeTruthy()
+    const hover = await render(at('sidebar.session.row.hover'), { sessionId: 'worker-fixture' }); views.push(hover)
+    expect(hover.container.textContent).toContain('task/review')
+    const action = await render(at('sidebar.workspaces.session.row.action'), { sessionId: 'worker-fixture' }); views.push(action)
+    expect(action.container.querySelector('button')?.getAttribute('aria-label')).toBe(zh.sideOpenTicket)
+    const dismiss = vi.fn()
+    const menu = await render(at('sidebar.workspaces.session.menu.item'), { sessionId: 'worker-fixture', useMenuOpenState: () => [true, dismiss] }); views.push(menu)
+    expect(menu.container.querySelector('[role="menuitem"]')?.textContent).toBe(zh.sideOpenTicket)
+    const icon = await render(host.nav, { size: 16 }); views.push(icon)
+    expect(icon.container.querySelector('.sa-side-dot[data-state="waiting"]')).toBeTruthy()
+    const panel = await render(host.main, { t }); views.push(panel)
+    const workspace = host.menus[0] as { resolve(target: { path: string; displayTitle: string }): { id: string; run(): unknown }[] }
+    const actions = workspace.resolve({ path: 'c:/DEV/Alpha/', displayTitle: 'Alpha' })
+    expect(actions.map(item => item.id)).toEqual(['router', 'board', 'new'])
+    expect(workspace.resolve({ path: 'c:/WORK/job', displayTitle: 'Job' }).map(item => item.id)).toEqual(['board', 'router'])
+    await act(async () => actions[0]!.run())
+    expect(host.ctx.uiWorkspace.openSession).toHaveBeenCalledWith('router-alpha')
+    await act(async () => { actions[1]!.run() })
+    expect(host.selectPanel).toHaveBeenCalledWith('dsh-superagent')
+    expect(vi.mocked(fetch).mock.calls.some(call => String(call[0]).includes('overview?project=alpha'))).toBe(true)
+    await act(async () => { actions[2]!.run() })
+    expect(panel.container.querySelector<HTMLSelectElement>('.dt-form select')?.value).toBe('alpha')
+    await act(async () => { menu.container.querySelector('button')!.click() })
+    expect(dismiss).toHaveBeenCalledWith(false)
+    expect(vi.mocked(fetch).mock.calls.some(call => String(call[0]).includes('tickets/fixture'))).toBe(true)
+    await act(async () => { workspace.resolve({ path: '/new/project', displayTitle: 'New Workspace' })[0]!.run() })
+    expect([...panel.container.querySelectorAll('input')].map(input => input.value)).toEqual(expect.arrayContaining(['/new/project', 'New Workspace']))
+  } finally { views.reverse().forEach(view => view.dispose()); host.dispose() }
 })

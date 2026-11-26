@@ -1,5 +1,5 @@
 import { Field } from './settings-kit.tsx'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ApiResponse } from '../app/api.ts'
 import type { ProjectInput } from '../app/projects.ts'
 import { Button, Input, Tag } from './controls.tsx'
@@ -7,27 +7,30 @@ import { useAction, usePanel, usePanelData } from './provider.tsx'
 
 type Row = ApiResponse<'GET projects'>['items'][number]
 export function ProjectsPage() {
-  const { t, call, openSession } = usePanel()
+  const { t, call, openSession, intent, clearIntent } = usePanel()
   const { projects, reloadProjects } = usePanelData()
   const [editing, edit] = useState<Row | 'new'>()
+  const [prefill, setPrefill] = useState<{ path: string; name: string }>()
+  useEffect(() => { if (intent?.kind === 'register') { setPrefill(intent); edit('new'); clearIntent?.() } }, [intent, clearIntent])
   const open = useAction(async (id: string) => openSession((await call('POST projects/:id/router', { id })).masterId), { reload: reloadProjects })
   return <div className="dt-form">
-    <Button variant="outline" onClick={() => edit('new')}>+ {t('projectAdd')}</Button>
+    <Button variant="outline" onClick={() => { setPrefill(undefined); edit('new') }}>+ {t('projectAdd')}</Button>
     {projects?.items.map(project => <section className="dt-block dt-project-card" key={project.id}>
       <div><strong>{project.name}</strong> <Tag>{project.id}</Tag> {project.id === projects.defaultId && <Tag tone="info">{t('projectDefault')}</Tag>}
         {project.archived && <Tag>{t('projectArchived')}</Tag>}<div className="dt-hint">{project.repositoryRoot}</div>
+        {project.routerWorkspace?.preserved && <div className="dt-hint">{t('sidePreservedWorkspace')} · {project.routerWorkspace.cwd}</div>}
         <div>{project.desks.map(desk => <Tag key={desk}>{desk}</Tag>)}</div></div>
       <div className="dt-toolbar"><Button size="sm" variant="outline" onClick={() => edit(project)}>{t('projectEdit')}</Button>
         <Button size="sm" variant="outline" disabled={project.archived || open.busy} onClick={() => void open.run(project.id)}>{t('openMaster')}</Button></div>
     </section>)}
-    {editing && <ProjectEditor key={editing === 'new' ? editing : editing.id} row={editing === 'new' ? undefined : editing} close={() => edit(undefined)} />}
+    {editing && <ProjectEditor key={editing === 'new' ? editing : editing.id} row={editing === 'new' ? undefined : editing} prefill={prefill} close={() => edit(undefined)} />}
   </div>
 }
-function ProjectEditor({ row, close }: { row: Row | undefined; close(): void }) {
+function ProjectEditor({ row, prefill, close }: { row: Row | undefined; prefill: { path: string; name: string } | undefined; close(): void }) {
   const { t, call } = usePanel()
   const { projects, reloadProjects } = usePanelData()
   const [value, set] = useState<ProjectInput>(() => row ? { id: row.id, name: row.name, repositoryRoot: row.repositoryRoot, worktreeRoot: row.worktreeRoot,
-    prepareMode: row.prepareMode, prepare: row.prepare, desks: row.desks, archived: row.archived } : { id: '', name: '', repositoryRoot: '', worktreeRoot: '', prepareMode: 'git', prepare: '', desks: ['dev', 'review', 'ops'], archived: false })
+    prepareMode: row.prepareMode, prepare: row.prepare, desks: row.desks, archived: row.archived } : { id: '', name: prefill?.name ?? '', repositoryRoot: prefill?.path ?? '', worktreeRoot: '', prepareMode: 'git', prepare: '', desks: ['dev', 'review', 'ops'], archived: false })
   const [desks, setDesks] = useState(value.desks.join(', '))
   const [makeDefault, setDefault] = useState(false)
   const field = <K extends keyof ProjectInput>(key: K, next: ProjectInput[K]) => set(previous => ({ ...previous, [key]: next }))

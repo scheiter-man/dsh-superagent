@@ -1,6 +1,7 @@
+import { execFileSync } from 'node:child_process'
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent } from '@deepseek-ai/dsh-scope'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { join } from 'node:path'
@@ -51,7 +52,7 @@ let http: HttpHandler
 async function api(method: string, path: string, body?: unknown, authorization = testAuthorization): Promise<{ status: number; body: unknown }> {
   let status = 0, text = ''
   const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
-  const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization },
+  const req = { method, url: path.startsWith('/') ? path : `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization },
     async *[Symbol.asyncIterator]() { yield* chunks } }
   await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
   return { status, body: JSON.parse(text) }
@@ -161,7 +162,7 @@ beforeEach(async () => {
   restricts = new Map()
   deliveries = vi.fn()
   controller = {
-    create: vi.fn(async ({ sessionId, agentPreset }) => {
+    create: vi.fn(async ({ sessionId, agentPreset, workspaceId }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const preset = {}
@@ -196,7 +197,7 @@ beforeEach(async () => {
         deliveries({ sessionId, mode, id: message.id, text: message.content.map(block => block.type === 'text' ? block.text : '').join('') })
         agents.get(sessionId)!.status = 'running'
       })
-      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(), whenIdle: async () => {} } as never)
+      agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver('queue'), steer: deliver('steer'), status: 'idle', inject: vi.fn(), session: { id: sessionId, header: { agentPreset, cwd: workspaceId }, snapshotEvents: () => modelEvents, requestHeader: () => undefined, append: vi.fn((type: string, data: unknown) => { modelEvents.push({ type, data }) }) }, cancel: vi.fn(), whenIdle: async () => {} } as never)
       bindScopeParent(agents.get(sessionId)!, preset)
     }),
     selectModel: vi.fn(async () => {}), resolveAgent: vi.fn(async id => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }), rename: vi.fn(async () => {}),
@@ -1350,7 +1351,7 @@ it('refuses a settings save with an unknown model or a Source kind that is not i
   const request = async (method: string, path: string, body?: unknown) => {
     let status = 0, text = ''
     const chunks = body === undefined ? [] : [Buffer.from(JSON.stringify(body))]
-    const req = { method, url: `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization: testAuthorization }, async *[Symbol.asyncIterator]() { yield* chunks } }
+    const req = { method, url: path.startsWith('/') ? path : `/orchestrator/api/${path}`, headers: { host: '127.0.0.1:3082', 'x-orchestrator-request': '1', authorization: testAuthorization }, async *[Symbol.asyncIterator]() { yield* chunks } }
     await http(req, { writeHead: (code: number) => { status = code }, end: (data: string) => { text = data } })
     return { status, body: JSON.parse(text) as Record<string, unknown> }
   }
@@ -1904,4 +1905,43 @@ it('opens independent Routers, scopes local tickets and rejects cross-project re
   expect((await api('GET', 'search?q=Scoped&project=beta')).body).toMatchObject({ tickets: [] })
   await expect(runTool(beta, 'orchestrator_ticket_note', { ticket_id: id, text: 'Cross project' })).rejects.toThrow('another project')
   await expect(runTool(beta, 'orchestrator_read', { resource: `ticket/${id}`, offset: 0, limit: 20 })).rejects.toThrow('Unknown')
+})
+
+
+it.each(['empty', 'history', 'inbox', 'running', 'missing'] as const)('anchors a project Router with %s legacy state', async state => {
+  const id = 'alpha', repositoryRoot = join(directory, 'repository')
+  mkdirSync(repositoryRoot)
+  execFileSync('git', ['init', '-q', repositoryRoot])
+  const base = { id, name: 'Alpha', repositoryRoot: '', worktreeRoot: '', prepareMode: 'shell', prepare: '', desks: ['dev'], archived: false }
+  expect((await api('PUT', `projects/${id}`, { project: base, revision: 0 })).status).toBe(200)
+  const first = await api('POST', `projects/${id}/router`)
+  const oldId = (first.body as { masterId: string }).masterId
+  const persistence = services.sessionPersistence as Record<string, unknown>
+  persistence.stat = vi.fn(async (session: string) => session === oldId ? { header: { cwd: directory }, revision: 1 } : undefined)
+  persistence.open = vi.fn(async () => ({ read: async () => ({ events: state === 'history' ? [{ type: 'user/message' }] : [] }), [Symbol.asyncDispose]: async () => {} }))
+  Object.assign(controller, { projections: vi.fn(async () => ({ values: { inbox: { 'next-turn': state === 'inbox' ? [{}] : [], 'next-step': [] } } })) })
+  if (state === 'running') agents.get(oldId)!.status = 'running'
+  expect((await api('PUT', `projects/${id}`, { project: { ...base, repositoryRoot }, revision: 1 })).status).toBe(200)
+  if (state === 'missing') rmSync(repositoryRoot, { recursive: true })
+  const [opened, repeated] = await Promise.all([api('POST', `projects/${id}/router`), api('POST', `projects/${id}/router`)])
+  expect(opened.status).toBe(200)
+  expect(repeated.body).toEqual(opened.body)
+  const { masterId } = opened.body as { masterId: string }
+  expect(masterId === oldId).toBe(state !== 'empty')
+  expect(agents.has(oldId)).toBe(true)
+  const projects = await api('GET', 'projects')
+  expect(projects.body).toHaveProperty('items', expect.arrayContaining([expect.objectContaining({ id, masterId, routerWorkspace: {
+    cwd: state === 'empty' ? realpathSync(repositoryRoot) : directory, preserved: state !== 'empty' && state !== 'missing',
+  } })]))
+})
+
+it('serves authenticated sidebar counts and native session ownership without opening a session', async () => {
+  await acceptedTicket()
+  controller.resolveAgent.mockClear()
+  const index = await api('GET', '/api/dsh-superagent/sidebar')
+  expect(index).toMatchObject({ status: 200, body: { totals: { open: 1 }, projects: [{ id: 'default' }],
+    sessions: { [runtime.masterId]: { kind: 'router', active: 1 } } } })
+  expect(Object.values((index.body as { sessions: Record<string, unknown> }).sessions)).toContainEqual(expect.objectContaining({ kind: 'worker' }))
+  expect(controller.resolveAgent).not.toHaveBeenCalled()
+  expect((await api('GET', '/api/dsh-superagent/sidebar', undefined, '')).status).toBe(401)
 })

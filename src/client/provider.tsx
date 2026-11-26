@@ -1,3 +1,5 @@
+import type { SidebarStore } from './sidebar-store.ts'
+import type { PanelIntent } from './panel-bridge.ts'
 import type { ApiResponse } from '../app/api.ts'
 /** Shared panel React contexts, state polling, restart detection, and action runner hook. */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
@@ -19,6 +21,8 @@ export interface PanelContext {
   restart: () => void
   activeProjectId: string
   selectProject(id: string): void
+  intent?: PanelIntent
+  clearIntent?: () => void
 }
 export interface PanelData {
   state: StateView | undefined
@@ -77,10 +81,13 @@ function Toast({ text, onDone, holdMs = 3000 }: { text: string; onDone: () => vo
 }
 const stay = () => {}
 const noSession = async () => {}
-export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children }: {
+export function PanelProvider({ t, interval = 5000, openSession = noSession, navigate = stay, back = stay, backLabel = '', children, sidebar, intent, clearIntent }: {
   t: T; interval?: number; openSession?: (sessionId: string) => Promise<void>; navigate?: PanelContext['navigate']; back?: () => void
   backLabel?: string
   children: ReactNode
+  sidebar?: SidebarStore
+  intent?: PanelIntent | undefined
+  clearIntent?: () => void
 }) {
   // Read the current translator via ref so locale changes do not recreate `call` and restart polling.
   const copy = useRef(t)
@@ -92,9 +99,15 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   const [entry, setEntry] = useState('')
   const activeToken = useRef(token)
   activeToken.current = token
-  const call = useMemo(() => caller(() => messages(copy.current), token, () => {
+  const baseCall = useMemo(() => caller(() => messages(copy.current), token, () => {
     if (token === activeToken.current) setLocked(true)
   }), [token])
+  const call: Call = useMemo(() => (route, ...request) => baseCall(route, ...request).then(result => {
+    if (!route.startsWith('GET ')) void sidebar?.refresh()
+    return result
+  }), [baseCall, sidebar])
+  useEffect(() => { sidebar?.unlock(token) }, [sidebar, token])
+  useEffect(() => { if (intent && 'projectId' in intent) selectProject(intent.projectId) }, [intent, selectProject])
   const [toast, setToast] = useState<{ text: string; id: number }>()
   const notify = useCallback((text: string) => setToast({ text, id: Date.now() }), [])
   // Poll at 1s during a restart until the server goes down and answers again, or time out after 30s if the restart completed between polls.
@@ -113,8 +126,8 @@ export function PanelProvider({ t, interval = 5000, openSession = noSession, nav
   }, [restarting])
   const { data: projects, reload: reloadProjects } = usePoll(() => call('GET projects'), [call], interval)
   const scope = projects && !projects.items.some(project => project.id === activeProjectId && !project.archived) ? 'all' : activeProjectId
-  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart, activeProjectId: scope, selectProject }),
-    [t, call, navigate, back, backLabel, openSession, notify, restart, scope, selectProject])
+  const context = useMemo(() => ({ t, call, navigate, back, backLabel, openSession, notify, restart, activeProjectId: scope, selectProject, ...(intent ? { intent } : {}), ...(clearIntent ? { clearIntent } : {}) }),
+    [t, call, navigate, back, backLabel, openSession, notify, restart, scope, selectProject, intent, clearIntent])
   const data = useMemo(() => ({ state, error, reload, setup: state?.setup, running: state?.load.running ?? 0, restarts, ...(projects ? { projects } : {}), reloadProjects }), [state, error,
     reload, restarts, projects, reloadProjects])
   return <Panel.Provider value={context}><PanelState.Provider value={data}>

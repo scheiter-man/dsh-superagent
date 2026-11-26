@@ -41,6 +41,14 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
   An upgrade that changes an overridden default marks it **Default updated** (默认内容已更新). The panel compares the old and new defaults above the team's text. If the old default was not recorded, it compares the team's text with the new default instead. Choose **Keep my text** or **Use the new default**. Overrides for removed parts are listed below the tab bar and dropped on the next save.
 - **Deployment:** startup problems with **Check again**, the state directory and machine limits. Saved limits apply without restart. The DeepSeek Harness Plugin Manager exposes the same page.
 
+## Native Desktop workspaces
+
+DSH 0.2.2-rc.5 shows Superagent alongside ordinary Workspaces and Sessions. Each registered repository has a project Router. Right-click the repository Workspace or use its **…** menu to open the Router, open the project board, or start a Ticket with that project selected. A Workspace under a project's worktree root can open the owning board or Router. An unregistered Workspace can open the Projects form with its directory and name already filled in.
+
+Router rows show their active Ticket count and highlight waiting work. Worker rows show the desk and color-coded state. The native hover card adds the project, state, and branch. The Session row action and **…** menu open the corresponding board or Ticket. The Superagent entry uses a warning dot for waiting work and a running dot for active execution.
+
+A Router with conversation history keeps its existing Session and directory. Settings → Projects shows the actual Router directory when it differs from the repository. A new Router or an empty idle legacy Router uses the repository Workspace.
+
 ## Search
 
 The header search finds Triggers by text, id, Feishu message id or a stored link, such as a GitHub comment URL. A Feishu link missing from the original message becomes searchable only after the host reads it during the current process lifetime.

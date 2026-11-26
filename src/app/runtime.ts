@@ -306,7 +306,12 @@ export class Runtime extends Service implements SourceHost {
     if (configured) {
       this.sessions.install()
       this.executor.install()
-      if (!this.paused()) await this.sessions.ensureMaster()
+      if (!this.paused()) {
+        await this.sessions.ensureMaster()
+        for (const project of this.projects.list()) if (project.id !== this.projects.legacyId && !project.archived) {
+          await this.sessions.ensureMaster(project.id).catch(error => this.ctx.logger.warn('Cannot open project Router: %s', String(error)))
+        }
+      }
       if (this.closing()) return
       for (const id of this.settings.syncable()) await this.settings.sync(id).catch(() => { /* sync() records its failure in health. */ })
       if (this.closing()) return
@@ -330,7 +335,7 @@ export class Runtime extends Service implements SourceHost {
     const runtime = this
     const { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks, setup, passes, projects, promptsOf } = this
     return { store, sources, prompts, sessions, settings, engine, executor, health, machine, sourceLinks, projects, promptsOf,
-      masterIdOf: id => sessions.masterIdOf(id), openMaster: async id => (await sessions.ensureMaster(id)).id,
+      masterIdOf: id => sessions.masterIdOf(id), routerWorkspace: id => sessions.routerWorkspace(id), openMaster: async id => (await sessions.ensureMaster(id)).id,
       workspaces: () => this.ctx.workspaceRegistry.list?.().map(({ id, title, path }) => ({ id, title, path })) ?? [],
       instanceId: this.instanceId, get ready() { return runtime.ready }, get masterId() { return runtime.masterId },
       get startupHold() { return runtime.startupHold }, get startupHoldCount() { return runtime.startupHoldCount },

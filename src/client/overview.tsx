@@ -1,5 +1,5 @@
 /** Overview page: pending Tickets requiring human action, active system problems, 24-hour flow counts, and Executor load. */
-import { useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { LocalSubmission } from '../app/local-intake.ts'
 import { Field } from './settings-kit.tsx'
 import { usePoll, type Problem } from './api.ts'
@@ -119,7 +119,7 @@ function workspaceName(title: string): string {
 }
 
 function NewLocalTicket({ refresh }: { refresh: () => Promise<void> }) {
-  const { call, notify, t, navigate, activeProjectId } = usePanel()
+  const { call, notify, t, navigate, activeProjectId, intent, clearIntent } = usePanel()
   const { projects } = usePanelData()
   const available = projects?.items.filter(project => !project.archived) ?? []
   const [projectId, setProjectId] = useState('')
@@ -130,6 +130,12 @@ function NewLocalTicket({ refresh }: { refresh: () => Promise<void> }) {
   const [title, setTitle] = useState('')
   const [text, setText] = useState('')
   const [workspace, setWorkspace] = useState('')
+  useEffect(() => {
+    if (intent?.kind !== 'new' || !projects) return
+    const project = projects.items.find(row => row.id === intent.projectId && !row.archived)
+    if (project) { setProjectId(project.id); setDesk(project.desks[0] ?? 'dev'); setOpen(true) }
+    clearIntent?.()
+  }, [intent, projects, clearIntent])
   const [ticket, setTicket] = useState<string>()
   const pending = useRef<{ payload: string; id: string } | undefined>(undefined)
   const action = useAction(async () => {

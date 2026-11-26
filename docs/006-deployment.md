@@ -4,19 +4,27 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 
 ## What runs
 
-- **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
+- **A DeepSeek Harness Profile.** The Desktop Profile supports shared native Workspaces and Sessions. A dedicated Web profile, called `superagent` in the service examples, lets you restart the service independently and serves its panel on loopback.
 - **An optional GitHub CLI identity.** A GitHub integration uses this account for comments, pushes and pull requests. Leave both GitHub fields empty for local-only operation.
 - **Optional:** a Feishu bot for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
-### Permissions and isolation
+## Desktop projects and the native sidebar
+
+In DSH 0.2.2-rc.5, enable the bundle in the Desktop Profile and register each repository through the Workspace menu or Superagent → Settings → Projects. Choose a project ID, worktree root and the desks that accept local Tickets. A new Router is anchored in that repository. An empty idle legacy Router can move to a new Session in the repository Workspace. Any earlier history remains in its original Session.
+
+Use the native Workspace menu to open the project Router, board or Ticket composer. Session rows open the matching board or Ticket and surface state in their badges and hover cards. The panel icon shows a dot for waiting or running work. `GET /api/dsh-superagent/sidebar` provides the read-only project/Session index using the same DSH admission or operator Bearer authentication as the panel.
+
+From an existing checkout, run `sa submit --desk dev --title "Review the change" --file request.md`. Intake identifies the registered project from the Git checkout, including linked worktrees. Use `--project <id>` to choose one explicitly. The local service CLI discovers the endpoint from the current Profile state, or from `--state-dir` when the storage is relocated.
+
+## Permissions and isolation
 
 The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-router` for the main Session. They appear in the DeepSeek Harness preset list but are intended only for dsh-superagent. Do not select them for personal Sessions or disable their configuration rows. The application needs them to create and resume its Sessions.
 
 Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
 
-Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
+Workers default to `danger-full-access` as the operator's OS user. Routers have read-only file access and a bounded inspection shell. Superagent applies the selected execution environment to its own subprocesses. For OS-level isolation, use a dedicated account containing only the agent's credentials.
 
 ## Prerequisites
 
@@ -245,7 +253,7 @@ The blocks:
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 
 ```sh
-api=http://127.0.0.1:3082/orchestrator/api
+api="$DSH_SUPERAGENT_URL/orchestrator/api"
 # private_headers_file contains an Authorization bearer header and is readable only by the operator.
 rev=$(curl -s -H 'x-orchestrator-request: 1' $api/settings | jq '.sources[] | select(.id == "github") | .revision')
 curl -s -X PUT -H 'x-orchestrator-request: 1' -H @"$private_headers_file" -H 'content-type: application/json' $api/settings/source:github \

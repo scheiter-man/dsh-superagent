@@ -34,7 +34,7 @@ async function api<T>(messages: ApiMessages, path: string, method: string, body?
   let response: Response
   const json = body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
   try {
-    response = await fetch(`/orchestrator/api/${path}`, { method, ...json, headers: {
+    response = await fetch(path === 'sidebar' ? '/api/dsh-superagent/sidebar' : `/orchestrator/api/${path}`, { method, ...json, headers: {
       'x-orchestrator-request': '1', ...json.headers, ...(token ? { authorization: `Bearer ${token}` } : {}),
     } })
   } catch {
@@ -143,3 +143,5 @@ export type PromptsView = ApiResponse<'GET prompts'>
 export type PromptConfig = PromptsView['defaults']
 export type ThreadFacts = TicketRow['threads'][number]
 export type Actor = TriggerRow['actor']
+
+export type SidebarView = ApiResponse<'GET sidebar'>

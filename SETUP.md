@@ -10,6 +10,12 @@ Instructions for an agent that sets up dsh-superagent with its operator. If you 
 
 Run `scripts/dsh-superagent init-token --output <private-file>` in an operator terminal, and put the printed SHA-256 value in the plugin's `operatorTokenHash` setting. The token itself stays outside the DSH profile, state directory and workspaces. The desktop panel accepts an authenticated DSH session and offers inline token entry when needed. Execution uses `danger-full-access` by default for unattended Git worktrees and automation; the operator can switch to `workspace-write` in **Settings → Execution**. Read the [deployment guide](docs/006-deployment.md) for workspaces, local submission, and backup.
 
+## Desktop setup
+
+Enable the Superagent bundle in the DSH 0.2.2-rc.5 Desktop Profile. Open the repository Workspace menu and choose **Register with Superagent**, then check its directory, project ID, worktree root and desks in the form. Repeat for each repository you want to use. The Workspace menu opens its Router, board or Ticket composer. Router and Worker rows show their state and provide direct links to the corresponding board or Ticket.
+
+Run `sa submit --project <id> --desk <desk> --title "Review the change" --file request.md`, or leave out `--project` when running from a registered Git checkout. See [Deployment](docs/006-deployment.md) for CLI endpoint discovery and [Panel](docs/005-panel.md) for the sidebar and Router behavior.
+
 ## Guided shared-repository setup
 
 ## How to run the setup
@@ -62,7 +68,7 @@ Ask in this order, one per message, following the flow of work in [docs/001-doma
 
 Do not ask about values with a good default; list them in the plan instead:
 
-- profile `superagent`, a copy of DSH's Web profile kept apart from the profile the operator works in, so it restarts without closing their Sessions; port `3082`; state directory `<home>/.dsh/state/superagent` as an absolute path;
+- profile `superagent`, a copy of DSH's Web profile kept apart from the profile the operator works in, so it restarts without closing their Sessions; an available loopback port; state directory `<home>/.dsh/state/superagent` as an absolute path;
 - an hourly check from the operator's own profile, which repairs dsh-superagent when it is not running;
 - branch prefix `agent/`;
 - accept mode `observe`, which records proactive work without doing it, and the default rules and prompt sections;

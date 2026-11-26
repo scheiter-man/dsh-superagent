@@ -1,3 +1,5 @@
+import type { PanelBridge, PanelIntent } from './panel-bridge.ts'
+import type { SidebarStore } from './sidebar-store.ts'
 /** Root panel shell: header with global search and glossary, top-level navigation tabs, and active route view. */
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { SearchView } from './api.ts'
@@ -174,7 +176,7 @@ function Pages({ route, openTab, deploymentForm }: { route: Route; openTab: (tab
 }
 
 /** Root panel component managing route history and shared panel state. */
-export function App({ t, openSession, deploymentForm }: AppProps) {
+export function App({ t, openSession, deploymentForm, bridge, sidebar }: AppProps & { bridge?: PanelBridge; sidebar?: SidebarStore }) {
   const [location, setLocation] = useState(initialLocation)
   useEffect(() => { remember(location) }, [location])
   // Preserve the last opened settings group across navigation so the Settings tab reopens at it.
@@ -186,7 +188,22 @@ export function App({ t, openSession, deploymentForm }: AppProps) {
   const back = useCallback(() => move(current => ({ route: current.stack.at(-1) ?? HOME, stack: current.stack.slice(0, -1) })), [move])
   const openTab = useCallback((tab: Tab) => move(current => ({ stack: [], route: tab === 'settings'
     ? settingsRoute(lastSettingsGroup(current)) : { page: tab, id: undefined } })), [move])
-  return <PanelProvider t={t} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
+  const [intent, setIntent] = useState<PanelIntent>()
+  const clearIntent = useCallback(() => setIntent(undefined), [])
+  useEffect(() => {
+    if (!bridge) return
+    const consume = () => {
+      const next = bridge.take()
+      if (!next) return
+      navigate(next.kind === 'register' ? settingsRoute('projects') : next.kind === 'ticket'
+        ? { page: 'execution', id: next.ticketId } : { page: 'overview' })
+      setIntent(next)
+    }
+    const unsubscribe = bridge.subscribe(consume)
+    consume()
+    return unsubscribe
+  }, [bridge, navigate])
+  return <PanelProvider t={t} {...(sidebar ? { sidebar } : {})} intent={intent} clearIntent={clearIntent} openSession={openSession} navigate={navigate} back={back} backLabel={routeLabel(t, location.stack.at(-1) ?? HOME)}>
     <Pages route={location.route} openTab={openTab} deploymentForm={deploymentForm} />
   </PanelProvider>
 }
